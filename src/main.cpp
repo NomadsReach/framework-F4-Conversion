@@ -15,7 +15,7 @@ static void SKSEMessageHandler(SKSE::MessagingInterface::Message *message) {
 extern "C" DLLEXPORT bool SKSEAPI
 SKSEPlugin_Load(const SKSE::LoadInterface *a_skse) {
 
-  SKSE::Init(a_skse, false);
+  SKSE::Init(a_skse, false); // false = don't initialize logger by default
   logger::init();
   // pattern: [2024-01-01 12:00:00.000] [info] [1234] [sourcefile.cpp:123] Log message
   spdlog::set_pattern("[%Y-%m-%d %T.%e] [%l] [%t] [%s:%#] %v");

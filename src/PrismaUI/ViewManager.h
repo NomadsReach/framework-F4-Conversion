@@ -1,10 +1,13 @@
 ﻿#pragma once
 
-#include <Ultralight/Ultralight.h>
-#include <Ultralight/View.h>
-#include <Ultralight/StringSTL.h>
+#pragma warning(push)
+#pragma warning(disable : 4100)
 #include <AppCore/Platform.h>
 #include <JavaScriptCore/JSRetainPtr.h>
+#include <Ultralight/StringSTL.h>
+#include <Ultralight/Ultralight.h>
+#include <Ultralight/View.h>
+#pragma warning(pop)
 
 namespace PrismaUI::Core {
 	typedef uint64_t PrismaViewId;
@@ -27,5 +30,11 @@ namespace PrismaUI::ViewManager {
 	int GetScrollingPixelSize(const Core::PrismaViewId& viewId);
 	void SetOrder(const Core::PrismaViewId& viewId, int order);
 	int GetOrder(const Core::PrismaViewId& viewId);
+
+	// Inspector View functions
+	void CreateInspectorView(const Core::PrismaViewId& viewId);
+	void SetInspectorVisibility(const Core::PrismaViewId& viewId, bool visible);
+	bool IsInspectorVisible(const Core::PrismaViewId& viewId);
+	void SetInspectorBounds(const Core::PrismaViewId& viewId, float topLeftX, float topLeftY, uint32_t width, uint32_t height);
 	bool HasAnyActiveFocus();
 }

@@ -30,7 +30,7 @@ namespace PrismaUI::InputHandler {
             return &singleton;
         }
 
-        RE::BSEventNotifyControl ProcessEvent(RE::InputEvent* const* a_event, RE::BSTEventSource<RE::InputEvent*>* a_eventSource) override {
+        RE::BSEventNotifyControl ProcessEvent(RE::InputEvent* const* a_event, [[maybe_unused]] RE::BSTEventSource<RE::InputEvent*>* a_eventSource) override {
             if (!a_event || !*a_event || !g_isAnyInputCaptureActive.load()) {
                 return RE::BSEventNotifyControl::kContinue;
             }
@@ -62,17 +62,16 @@ namespace PrismaUI::InputHandler {
                     if (!buttonEvent || buttonEvent->GetDevice() != RE::INPUT_DEVICE::kMouse)
                         break;
 
-                    const auto idCode = buttonEvent->idCode;
+                    const auto idCode = buttonEvent->GetIDCode();
                     bool isPressed = buttonEvent->IsPressed();
                     bool isUp = buttonEvent->IsUp();
 
                     if (idCode <= 2) {
-                        ultralight::MouseEvent::Button button;
+                        ultralight::MouseEvent::Button button = ultralight::MouseEvent::kButton_None;
                         switch (idCode) {
                         case 0: button = ultralight::MouseEvent::kButton_Left; break;
                         case 1: button = ultralight::MouseEvent::kButton_Right; break;
                         case 2: button = ultralight::MouseEvent::kButton_Middle; break;
-                        default: continue;
                         }
 
                         if (isPressed && !g_mouseButtonStates[idCode]) {
@@ -103,9 +102,11 @@ namespace PrismaUI::InputHandler {
 
                     else if (idCode == 8 || idCode == 9) {
                         if (isPressed) {
-                            ultralight::ScrollEvent ev;
-                            ev.type = ultralight::ScrollEvent::kType_ScrollByPixel;
-                            ev.delta_x = 0;
+                            ScrollEventWithPosition scrollWithPos;
+                            scrollWithPos.event.type = ultralight::ScrollEvent::kType_ScrollByPixel;
+                            scrollWithPos.event.delta_x = 0;
+                            scrollWithPos.mouseX = static_cast<int>(cursor->cursorPosX);
+                            scrollWithPos.mouseY = static_cast<int>(cursor->cursorPosY);
 
                     int scrollPixelSize = 28;
 
@@ -123,16 +124,16 @@ namespace PrismaUI::InputHandler {
                                 }
                             }
 
-                            float scrollAmount = SCROLL_LINES_PER_WHEEL_DELTA * scrollPixelSize;
+                            int scrollAmount = SCROLL_LINES_PER_WHEEL_DELTA * scrollPixelSize;
                             if (idCode == 9) {
-                                ev.delta_y = -scrollAmount;
+                                scrollWithPos.event.delta_y = -scrollAmount;
                             }
                             else {
-                                ev.delta_y = scrollAmount;
+                                scrollWithPos.event.delta_y = scrollAmount;
                             }
 
                             std::lock_guard lock(g_eventQueueMutex);
-                            g_eventQueue.emplace_back(ev);
+                            g_eventQueue.emplace_back(scrollWithPos);
                         }
                     }
                     break;
@@ -263,14 +264,14 @@ namespace PrismaUI::InputHandler {
         return g_isAnyInputCaptureActive.load() && (currentFocused == viewId);
     }
 
-    LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         if (!g_originalWndProc && uMsg != WM_NCDESTROY && uMsg != WM_CREATE) {
-            return DefWindowProc(hWnd, uMsg, wParam, lParam);
+            return DefWindowProc(hwnd, uMsg, wParam, lParam);
         }
 
         if (uMsg == WM_NCHITTEST) {
-            if (g_originalWndProc) return CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam);
-            return DefWindowProc(hWnd, uMsg, wParam, lParam);
+            if (g_originalWndProc) return CallWindowProc(g_originalWndProc, hwnd, uMsg, wParam, lParam);
+            return DefWindowProc(hwnd, uMsg, wParam, lParam);
         }
 
         if (g_isAnyInputCaptureActive.load()) {
@@ -290,7 +291,7 @@ namespace PrismaUI::InputHandler {
 
                     BYTE kbdState[256];
                     GetKeyboardState(kbdState);
-                    HKL currentLayout = GetKeyboardLayout(GetWindowThreadProcessId(hWnd, NULL));
+                    HKL currentLayout = GetKeyboardLayout(GetWindowThreadProcessId(hwnd, NULL));
 
                     wchar_t translatedChars[5] = { 0 };
                     int charCount = ToUnicodeEx((UINT)wParam, ((lParam >> 16) & 0xFF), kbdState, translatedChars, 4, 0, currentLayout);
@@ -305,9 +306,10 @@ namespace PrismaUI::InputHandler {
                                     charEvent.type = ultralight::KeyEvent::kType_Char;
                                     WinKeyHandler::GetUltralightModifiers(charEvent);
 
-                                    std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> converter;
                                     wchar_t single_char_str[2] = { ch, 0 };
-                                    std::string narrow_string = converter.to_bytes(single_char_str);
+                                    char utf8_buffer[8] = { 0 };
+                                    int utf8_len = WideCharToMultiByte(CP_UTF8, 0, single_char_str, -1, utf8_buffer, sizeof(utf8_buffer), nullptr, nullptr);
+                                    std::string narrow_string = (utf8_len > 0) ? std::string(utf8_buffer) : std::string();
                                     ultralight::String ul_text = ultralight::Convert(narrow_string);
 
                                     charEvent.text = ul_text;
@@ -353,9 +355,9 @@ namespace PrismaUI::InputHandler {
         }
 
         if (g_originalWndProc) {
-            return CallWindowProc(g_originalWndProc, hWnd, uMsg, wParam, lParam);
+            return CallWindowProc(g_originalWndProc, hwnd, uMsg, wParam, lParam);
         }
-        return DefWindowProc(hWnd, uMsg, wParam, lParam);
+        return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
 
     void ProcessEvents() {
@@ -393,27 +395,77 @@ namespace PrismaUI::InputHandler {
 
             if (targetViewData && targetViewData->ultralightView) {
                 ultralight::View* ulView = targetViewData->ultralightView.get();
+                ultralight::View* inspectorView = targetViewData->inspectorView ? targetViewData->inspectorView.get() : nullptr;
+                
                 for (const auto& event_variant : ev_queue) {
-                    std::visit([ulView](const auto& arg) {
+                    std::visit([ulView, inspectorView, &targetViewData](const auto& arg) {
                         using T = std::decay_t<decltype(arg)>;
                         if constexpr (std::is_same_v<T, ultralight::MouseEvent>) {
-                            ulView->FireMouseEvent(arg);
-                        }
-                        else if constexpr (std::is_same_v<T, ultralight::ScrollEvent>) {
-                            ulView->FireScrollEvent(arg);
-                        }
-                        else if constexpr (std::is_same_v<T, ultralight::KeyEvent>) {
-                            if (arg.type == ultralight::KeyEvent::kType_RawKeyDown || arg.type == ultralight::KeyEvent::kType_KeyUp) {
-                                ultralight::String keyIdentifier = arg.key_identifier;
-                                ultralight::GetKeyIdentifierFromVirtualKeyCode(arg.virtual_key_code, keyIdentifier);
+                            // Check if mouse is over inspector bounds when inspector is visible
+                            bool mouseOverInspector = false;
+                            if (inspectorView && targetViewData->inspectorVisible.load()) {
+                                const float inspX = targetViewData->inspectorPosX;
+                                const float inspY = targetViewData->inspectorPosY;
+                                const float inspW = static_cast<float>(targetViewData->inspectorDisplayWidth);
+                                const float inspH = static_cast<float>(targetViewData->inspectorDisplayHeight);
+                                
+                                const float mouseX = static_cast<float>(arg.x);
+                                const float mouseY = static_cast<float>(arg.y);
+                                
+                                if (mouseX >= inspX && mouseX < (inspX + inspW) &&
+                                    mouseY >= inspY && mouseY < (inspY + inspH)) {
+                                    mouseOverInspector = true;
+                                    targetViewData->inspectorPointerHover.store(true);
+                                } else {
+                                    targetViewData->inspectorPointerHover.store(false);
+                                }
                             }
-
-                            ulView->FireKeyEvent(arg);
+                            
+                            if (mouseOverInspector) {
+                                // Translate mouse coordinates to inspector view
+                                ultralight::MouseEvent inspectorEvent = arg;
+                                inspectorEvent.x = arg.x - static_cast<int>(targetViewData->inspectorPosX);
+                                inspectorEvent.y = arg.y - static_cast<int>(targetViewData->inspectorPosY);
+                                inspectorView->FireMouseEvent(inspectorEvent);
+                            } else {
+                                ulView->FireMouseEvent(arg);
+                            }
+                        } else if constexpr (std::is_same_v<T, ScrollEventWithPosition>) {
+                            // Route scroll events to inspector if mouse is over it
+                            // Use captured mouse position for accurate bounds checking
+                            bool scrollOverInspector = false;
+                            if (inspectorView && targetViewData->inspectorVisible.load()) {
+                                const float inspX = targetViewData->inspectorPosX;
+                                const float inspY = targetViewData->inspectorPosY;
+                                const float inspW = static_cast<float>(targetViewData->inspectorDisplayWidth);
+                                const float inspH = static_cast<float>(targetViewData->inspectorDisplayHeight);
+                                
+                                const float mouseX = static_cast<float>(arg.mouseX);
+                                const float mouseY = static_cast<float>(arg.mouseY);
+                                
+                                if (mouseX >= inspX && mouseX < (inspX + inspW) &&
+                                    mouseY >= inspY && mouseY < (inspY + inspH)) {
+                                    scrollOverInspector = true;
+                                }
+                            }
+                            if (scrollOverInspector) {
+                                inspectorView->FireScrollEvent(arg.event);
+                            } else {
+                                ulView->FireScrollEvent(arg.event);
+                            }
+                        } else if constexpr (std::is_same_v<T, ultralight::KeyEvent>) {
+                            // Route keyboard events to inspector if it's visible and focused
+                            if (inspectorView && targetViewData->inspectorVisible.load() && 
+                                inspectorView->HasFocus()) {
+                                inspectorView->FireKeyEvent(arg);
+                            } else {
+                                ulView->FireKeyEvent(arg);
+                            }
                         }
-                        }, event_variant);
+                    }, event_variant);
                 }
             }
-            });
+        });
     }
 
     void Shutdown() {

@@ -13,3 +13,6 @@ instructions/
 # files
 *.zip
 compile_commands.json
+/release/
+/dist/
+external/ultralight-free-sdk-1.4.1-dev-win-x64.7z

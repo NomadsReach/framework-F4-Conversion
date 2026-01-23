@@ -46,9 +46,11 @@ private:
 
             }
             catch (const std::exception& e) {
+                std::cerr << "RepeatingTaskRunner: Task threw exception: " << e.what() << std::endl;
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
             catch (...) {
+                std::cerr << "RepeatingTaskRunner: Task threw unknown exception" << std::endl;
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         }

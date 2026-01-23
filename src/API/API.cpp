@@ -1,7 +1,7 @@
 ﻿#include "API.h"
-#include <Utils/Encoding.h>
-#include <PrismaUI/ViewManager.h>
-#include <PrismaUI/Communication.h>
+#include "Utils/Encoding.h"
+#include "PrismaUI/ViewManager.h"
+#include "PrismaUI/Communication.h"
 
 PrismaView PluginAPI::PrismaUIInterface::CreateView(const char* htmlPath, PRISMA_UI_API::OnDomReadyCallback onDomReadyCallback) noexcept
 {
@@ -34,6 +34,9 @@ void PluginAPI::PrismaUIInterface::Invoke(PrismaView view, const char* script, P
     }
     else {
         processedScript = convertFromANSIToUTF8(script);
+        if (processedScript.empty()) {
+            return;  // Conversion failed, cannot safely invoke
+        }
     }
 
     ultralight::String _script(processedScript.c_str());
@@ -64,6 +67,9 @@ void PluginAPI::PrismaUIInterface::InteropCall(PrismaView view, const char* func
     }
     else {
         processedArgument = convertFromANSIToUTF8(argument);
+        if (processedArgument.empty()) {
+            return;  // Conversion failed, cannot safely call
+        }
     }
 
     return PrismaUI::Communication::InteropCall(view, functionName, processedArgument);
@@ -178,6 +184,38 @@ int PluginAPI::PrismaUIInterface::GetOrder(PrismaView view) noexcept
 		return -1;
 	}
 	return PrismaUI::ViewManager::GetOrder(view);
+}
+
+void PluginAPI::PrismaUIInterface::CreateInspectorView(PrismaView view) noexcept
+{
+    if (!view) {
+        return;
+    }
+    return PrismaUI::ViewManager::CreateInspectorView(view);
+}
+
+void PluginAPI::PrismaUIInterface::SetInspectorVisibility(PrismaView view, bool visible) noexcept
+{
+    if (!view) {
+        return;
+    }
+    return PrismaUI::ViewManager::SetInspectorVisibility(view, visible);
+}
+
+bool PluginAPI::PrismaUIInterface::IsInspectorVisible(PrismaView view) noexcept
+{
+    if (!view) {
+        return false;
+    }
+    return PrismaUI::ViewManager::IsInspectorVisible(view);
+}
+
+void PluginAPI::PrismaUIInterface::SetInspectorBounds(PrismaView view, float topLeftX, float topLeftY, unsigned int width, unsigned int height) noexcept
+{
+    if (!view) {
+        return;
+    }
+    return PrismaUI::ViewManager::SetInspectorBounds(view, topLeftX, topLeftY, width, height);
 }
 
 bool PluginAPI::PrismaUIInterface::HasAnyActiveFocus() noexcept

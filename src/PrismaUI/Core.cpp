@@ -1,10 +1,13 @@
 ﻿#include "Core.h"
-#include "ViewRenderer.h"
-#include "ViewManager.h"
-#include "Listeners.h"
-#include "InputHandler.h"
 #include "Communication.h"
+#include "InputHandler.h"
+#include "Inspector.h"
+#include "Listeners.h"
+#include "ViewManager.h"
 #include "ViewOperationQueue.h"
+#include "ViewRenderer.h"
+#include "Utils/DllLoader.h"
+
 
 namespace PrismaUI::Core {
 	using namespace PrismaUI::Listeners;
@@ -13,9 +16,9 @@ namespace PrismaUI::Core {
 	using namespace PrismaUI::InputHandler;
 
 	SingleThreadExecutor ultralightThread;
-	std::unique_ptr<RepeatingTaskRunner> logicRunner;
 	NanoIdGenerator generator;
 	std::atomic<bool> coreInitialized = false;
+	std::atomic<bool> rendererInitFailed = false;
 
 	RefPtr<Renderer> renderer;
 	ID3D11Device* d3dDevice = nullptr;
@@ -43,25 +46,24 @@ namespace PrismaUI::Core {
 	void InitializeCoreSystem() {
 		logger::info("Initializing PrismaUI Core System...");
 		InitHooks();
-
-		logicRunner = std::make_unique<RepeatingTaskRunner>([]() {
-			ultralightThread.submit(&UpdateLogic).get();
-			});
-
-		ultralightThread.submit([] {
+		
+		const auto basePath = Utils::GetBasePath();
+		ultralightThread.submit([basePath]() {
 			try {
 				Platform& plat = Platform::instance();
 				plat.set_logger(new MyUltralightLogger());
 				plat.set_font_loader(ultralight::GetPlatformFontLoader());
 
-				plat.set_file_system(ultralight::GetPlatformFileSystem("."));
+				plat.set_file_system(ultralight::GetPlatformFileSystem(basePath.string().c_str()));
 
 				Config config;
+				config.resource_path_prefix = "resources/";
 				plat.set_config(config);
 
 				renderer = Renderer::Create();
 				if (!renderer) {
 					logger::critical("Failed to create Ultralight Renderer!");
+					rendererInitFailed = true;
 				}
 				else {
 					logger::info("Ultralight Platform configured and Renderer created on UI thread.");
@@ -69,16 +71,18 @@ namespace PrismaUI::Core {
 			}
 			catch (const std::exception& e) {
 				logger::critical("Exception during Ultralight Platform/Renderer init on UI thread: {}", e.what());
+				rendererInitFailed = true;
 			}
 			catch (...) {
 				logger::critical("Unknown exception during Ultralight Platform/Renderer init on UI thread.");
+				rendererInitFailed = true;
 			}
 			}).get();
 
 		auto ui = RE::UI::GetSingleton();
 		ui->Register(FocusMenu::MENU_NAME, FocusMenu::Creator);
 
-		logger::info("PrismaUI Core System Initialized.");
+		logger::info("PrismaUI Core System Initialized. Base Path {}", basePath.string());
 	}
 
 	void InitHooks() {
@@ -135,12 +139,13 @@ namespace PrismaUI::Core {
 			}
 
 			if (!cursorTexture && d3dDevice) {
-				try {
-					DirectX::CreateWICTextureFromFile(d3dDevice, L"Data/PrismaUI/misc/cursor.png", nullptr, &cursorTexture);
+				auto cursorPath = Utils::GetBasePath() / "misc" / "cursor.png";
+				HRESULT hr = DirectX::CreateWICTextureFromFile(d3dDevice, cursorPath.wstring().c_str(), nullptr, &cursorTexture);
+				if (SUCCEEDED(hr)) {
 					logger::info("Cursor texture loaded successfully.");
 				}
-				catch (const std::exception& e) {
-					logger::critical("Failed to load cursor texture: {}", e.what());
+				else {
+					logger::error("Failed to load cursor texture from '{}'. HRESULT: 0x{:08X}", cursorPath.string(), static_cast<unsigned int>(hr));
 					cursorTexture.Reset();
 				}
 			}
@@ -154,7 +159,7 @@ namespace PrismaUI::Core {
 	void D3DPresent(uint32_t a_p1) {
 		RealD3dPresentFunc(a_p1);
 
-		if (!coreInitialized) return;
+		if (!coreInitialized || rendererInitFailed) return;
 
 		if (!d3dDevice || !d3dContext || !spriteBatch || !commonStates || !hWnd || screenSize.width == 0) {
 			InitGraphics();
@@ -184,6 +189,7 @@ namespace PrismaUI::Core {
 			if (viewData) {
 				logger::debug("D3DPresent: Releasing D3D resources for View [{}] from render thread", viewId);
 				ViewRenderer::ReleaseViewTexture(viewData.get());
+				Inspector::ReleaseInspectorTexture(viewData.get());
 				viewData->pendingResourceRelease = false;
 			}
 		}
@@ -243,12 +249,13 @@ namespace PrismaUI::Core {
 			ProcessEvents();
 
 			if (renderer) {
+				renderer->Update();
 				renderer->RefreshDisplay(0);
 				renderer->Render();
 			}
 
 			RenderViews();
-			});
+			}).get();  // Wait for UI thread to complete before accessing view data
 
 		std::vector<std::shared_ptr<PrismaView>> viewsToCheck;
 		{
@@ -305,21 +312,17 @@ namespace PrismaUI::Core {
 		d3dContext = nullptr;
 		hWnd = nullptr;
 
-		if (logicRunner) {
-			logicRunner->stop();
-			logicRunner.reset();
-		}
-
 		{
 			std::unique_lock lock(viewsMutex);
 			views.clear();
 		}
 		if (renderer) {
-			ultralightThread.submit([renderer_ptr = renderer]() mutable {
+			// Move renderer to the lambda so it's the sole owner,
+			// ensuring release happens on the UI thread
+			ultralightThread.submit([renderer_moved = std::move(renderer)]() mutable {
 				logger::info("Releasing global renderer on UI thread.");
-				renderer_ptr = nullptr;
-				}).get();
-			renderer = nullptr;
+				renderer_moved = nullptr;
+			}).get();
 		}
 
 		coreInitialized = false;

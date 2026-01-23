@@ -1,5 +1,5 @@
 ﻿#include "CursorMenu.h"
-#include <PrismaUI/ViewManager.h>
+#include "PrismaUI/ViewManager.h"
 
 void CursorMenuEx::AdvanceMovie_Hook(float a_interval, std::uint32_t a_currentTime)
 {

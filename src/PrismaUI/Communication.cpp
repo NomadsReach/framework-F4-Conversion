@@ -148,7 +148,7 @@ namespace PrismaUI::Communication {
 	}
 
 	JSValueRef JSCallbackDispatcher(JSContextRef ctx, JSObjectRef function,
-		JSObjectRef thisObject, size_t argumentCount,
+		[[maybe_unused]] JSObjectRef thisObject, size_t argumentCount,
 		const JSValueRef arguments[], JSValueRef* exception) {
 
 		logger::debug("JSCallbackDispatcher: Entered.");
@@ -306,7 +306,7 @@ namespace PrismaUI::Communication {
 	}
 
 	JSValueRef InvokeCppCallback(JSContextRef ctx, JSObjectRef function,
-		JSObjectRef thisObject, size_t argumentCount,
+		[[maybe_unused]] JSObjectRef thisObject, size_t argumentCount,
 		const JSValueRef arguments[], JSValueRef* exception) {
 
 		logger::debug("InvokeCppCallback: Called from JavaScript");

@@ -107,7 +107,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${ULTRALIGHT_BINARY_DIR}"
     "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
-    COMMENT "Copying Ultralight DLLs to output directory"
+    COMMAND "${CMAKE_COMMAND}" -E echo "Copying Ultralight DLLs to output directory"
 )
 
 # Post-build: Create distribution folder structure
@@ -137,6 +137,6 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         "$<$<BOOL:$<TARGET_PDB_FILE:${PROJECT_NAME}>>:$<TARGET_PDB_FILE:${PROJECT_NAME}>>"
         "${DIST_SKSE_PLUGINS_DIR}/"
     
-    COMMENT "Creating distribution folder: dist/PrismaUI_${PROJECT_VERSION}"
+    COMMAND "${CMAKE_COMMAND}" -E echo "Creating distribution folder: dist/PrismaUI_${PROJECT_VERSION}"
 )
 

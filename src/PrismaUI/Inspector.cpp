@@ -179,15 +179,22 @@ std::atomic<bool> gInspectorAssetsAvailable{false};
 
 		if (visible && viewData->inspectorView) {
 			// Focus the inspector view when made visible
-			auto future = ultralightThread.submit_with_priority(SingleThreadExecutor::Priority::MEDIUM, [view = viewData]() {
+			auto focusInspector = [view = viewData]() {
 				if (view->inspectorView) {
 					view->inspectorView->Focus();
 				}
 				if (view->ultralightView && view->ultralightView->HasFocus()) {
 					view->ultralightView->Unfocus();
 				}
-			});
-			future.wait();
+			};
+
+			if (ultralightThread.IsWorkerThread()) {
+				focusInspector();
+			}
+			else {
+				auto future = ultralightThread.submit_with_priority(SingleThreadExecutor::Priority::MEDIUM, focusInspector);
+				future.wait();
+			}
 		}
 
 		logger::info("View [{}]: Inspector visibility set to {}.", viewId, visible);

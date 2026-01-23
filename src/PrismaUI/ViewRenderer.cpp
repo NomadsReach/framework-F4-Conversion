@@ -312,14 +312,15 @@ namespace PrismaUI::ViewRenderer {
 			viewData->inspectorTextureHeight > 0) {
 
 			DirectX::SimpleMath::Vector2 inspectorPos(viewData->inspectorPosX, viewData->inspectorPosY);
-			RECT inspectorRect = { 
+			// Source rect should use actual texture dimensions
+			RECT inspectorSourceRect = { 
 				0, 0, 
-				(long)viewData->inspectorDisplayWidth, 
-				(long)viewData->inspectorDisplayHeight 
+				(long)viewData->inspectorTextureWidth, 
+				(long)viewData->inspectorTextureHeight 
 			};
 
 			spriteBatch->Draw(
-				viewData->inspectorTextureView, inspectorPos, &inspectorRect,
+				viewData->inspectorTextureView, inspectorPos, &inspectorSourceRect,
 				DirectX::Colors::White, 0.f, DirectX::SimpleMath::Vector2::Zero,
 				1.0f, DirectX::SpriteEffects_None, 0.f
 			);

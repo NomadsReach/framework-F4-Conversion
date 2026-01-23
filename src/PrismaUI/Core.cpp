@@ -20,6 +20,9 @@ namespace PrismaUI::Core {
 	std::atomic<bool> coreInitialized = false;
 	std::atomic<bool> rendererInitFailed = false;
 
+	// Ultralight platform objects - ownership remains with caller per API docs
+	static std::unique_ptr<MyUltralightLogger> ultralightLogger;
+
 	RefPtr<Renderer> renderer;
 	ID3D11Device* d3dDevice = nullptr;
 	ID3D11DeviceContext* d3dContext = nullptr;
@@ -51,7 +54,8 @@ namespace PrismaUI::Core {
 		ultralightThread.submit([basePath]() {
 			try {
 				Platform& plat = Platform::instance();
-				plat.set_logger(new MyUltralightLogger());
+				ultralightLogger = std::make_unique<MyUltralightLogger>();
+				plat.set_logger(ultralightLogger.get());
 				plat.set_font_loader(ultralight::GetPlatformFontLoader());
 
 				plat.set_file_system(ultralight::GetPlatformFileSystem(basePath.string().c_str()));
@@ -324,6 +328,9 @@ namespace PrismaUI::Core {
 				renderer_moved = nullptr;
 			}).get();
 		}
+
+		// Release Ultralight platform objects after renderer is destroyed
+		ultralightLogger.reset();
 
 		coreInitialized = false;
 		logger::info("PrismaUI Core System shut down complete.");

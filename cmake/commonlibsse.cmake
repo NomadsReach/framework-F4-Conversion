@@ -20,8 +20,8 @@ set(COMMONLIB_STAMP_FILE "${BUILD_ROOT}/external_builds/${CommonLibName}.stamp")
 # Add CommonLibSSE-NG as a subdirectory with EXCLUDE_FROM_ALL
 add_subdirectory(${CommonLibPath} "${BUILD_ROOT}/external_builds/${CommonLibName}" EXCLUDE_FROM_ALL)
 # Create stamp file after configuration (informational only)
-if(NOT EXISTS ${COMMONLIB_STAMP_FILE})
-    file(WRITE ${COMMONLIB_STAMP_FILE} "Configured on ${CMAKE_SYSTEM_NAME}")
+if(NOT EXISTS "${COMMONLIB_STAMP_FILE}")
+    file(WRITE "${COMMONLIB_STAMP_FILE}" "Configured on ${CMAKE_SYSTEM_NAME}")
 endif()
 
 # Include the CommonLibSSE helper cmake functions (provides add_commonlibsse_plugin macro)

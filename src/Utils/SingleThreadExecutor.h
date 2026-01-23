@@ -61,6 +61,7 @@ public:
     }
 
     void SetExceptionHandler(std::function<void(const std::exception_ptr&)> handler) {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
         exception_handler_ = std::move(handler);
     }
 
@@ -126,9 +127,14 @@ inline void SingleThreadExecutor::run() {
         catch (...) {
             // Infrastructure exceptions (not user task exceptions, which are
             // captured by packaged_task). Report via handler if available.
-            if (exception_handler_) {
+            std::function<void(const std::exception_ptr&)> handler;
+            {
+                std::lock_guard<std::mutex> lock(queue_mutex_);
+                handler = exception_handler_;
+            }
+            if (handler) {
                 try {
-                    exception_handler_(std::current_exception());
+                    handler(std::current_exception());
                 } catch (...) {
                     // Prevent exception handler from throwing
                 }

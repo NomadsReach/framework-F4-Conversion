@@ -311,8 +311,9 @@ namespace PrismaUI::Communication {
 
 		logger::debug("InvokeCppCallback: Called from JavaScript");
 
-		JSValueRef dataValue = JSObjectGetProperty(ctx, function,
-			JSStringCreateWithUTF8CString("data"), exception);
+		JSStringRef dataKeyStr = JSStringCreateWithUTF8CString("data");
+		JSValueRef dataValue = JSObjectGetProperty(ctx, function, dataKeyStr, exception);
+		JSStringRelease(dataKeyStr);
 
 		if (!dataValue || JSValueIsNull(ctx, dataValue) || JSValueIsUndefined(ctx, dataValue)) {
 			logger::error("InvokeCppCallback: No data attached to the function");

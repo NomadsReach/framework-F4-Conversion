@@ -16,6 +16,11 @@ FocusMenu::FocusMenu()
 	using MenuFlag = RE::UI_MENU_FLAGS;
 
 	auto scaleformManager = RE::BSScaleformManager::GetSingleton();
+	if (!scaleformManager) {
+		logger::error("FocusMenu: BSScaleformManager singleton is null");
+		return;
+	}
+
 	const bool success = scaleformManager->LoadMovieEx(this, "cursormenu", []([[maybe_unused]] RE::GFxMovieDef* a_def) -> void {});
 
 	if (!success || !this->uiMovie) {

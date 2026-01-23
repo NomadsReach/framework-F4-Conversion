@@ -18,7 +18,8 @@ Skyrim Next-Gen Web UI Framework.
 - [vcpkg](https://vcpkg.io/) with `VCPKG_ROOT` environment variable set
 - Visual Studio 2022 with C++23 support
 - C++23 Compiler (MSVC)
-
+- [Ultralight SDK](https://ultralig.ht/download) 1.4.1-dev
+  - place the archive "ultralight-free-sdk-1.4.1-dev-win-x64.7z" in the "external folder.
 ### Getting Started
 
 ```bat

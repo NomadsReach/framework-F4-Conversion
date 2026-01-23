@@ -1,9 +1,13 @@
 # Define variables
+
 set(ARCHIVE_FILE "external/ultralight-free-sdk-1.4.1-dev-win-x64.7z")
 
 # Check if archive exists
 if(NOT EXISTS "${ARCHIVE_FILE}")
-    message(FATAL_ERROR "Ultralight SDK archive not found: ${ARCHIVE_FILE}")
+    message(FATAL_ERROR  
+    " Ultralight SDK archive not found in 'external' folder.\n"
+    " Download version 1.4.1-dev from https://ultralig.ht/download"
+    )
 endif()
 
 set(DESTINATION_DIR "${BUILD_ROOT}/external_builds/ultralight")

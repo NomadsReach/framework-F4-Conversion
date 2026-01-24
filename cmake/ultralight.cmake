@@ -1,6 +1,6 @@
-# Define variables
+﻿# Define variables
 
-set(ARCHIVE_FILE "external/ultralight-free-sdk-1.4.1-dev-win-x64.7z")
+set(ARCHIVE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/external/ultralight-free-sdk-1.4.1-dev-win-x64.7z")
 
 # Check if archive exists
 if(NOT EXISTS "${ARCHIVE_FILE}")

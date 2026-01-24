@@ -66,33 +66,11 @@ Available presets: `debug`, `release`
 - **DLL Output**: `build/release/bin/PrismaUI.dll`
 - **Distribution Package**: `dist/PrismaUI_<version>/` (created automatically after build)
 
-### Build with XMake (Alternative)
-
-```bat
-xmake build
-```
-
-> **_Note:_** This will generate a `build/windows/` directory in the **project's root directory** with the build output.
-
-#### Project Generation for Visual Studio (XMake)
-
-```bat
-xmake project -k vsxmake
-```
-
-> **_Note:_** This will generate a `vsxmakeXXXX/` directory using the latest version of Visual Studio installed on the system.
-
 ### Upgrading Packages (Optional)
 
 **vcpkg:**
 ```bat
 vcpkg upgrade
-```
-
-**XMake:**
-```bat
-xmake repo --update
-xmake require --upgrade
 ```
 
 ## Dependencies / Acknowledgments

@@ -1,6 +1,7 @@
 ﻿#include "ViewManager.h"
 #include "Core.h"
 #include "InputHandler.h"
+#include "Inspector.h"
 #include "Listeners.h"
 #include "ViewOperationQueue.h"
 
@@ -29,7 +30,7 @@ namespace PrismaUI::ViewManager {
 		if (htmlPath.substr(0, 7) == "http://" || htmlPath.substr(0, 8) == "https://") {
 			fileUrl = htmlPath;
 		} else {
-			fileUrl = "file:///Data/PrismaUI/views/" + htmlPath;
+			fileUrl = "file:///views/" + htmlPath;
 		}
 
 		auto viewData = std::make_shared<Core::PrismaView>();
@@ -365,7 +366,7 @@ namespace PrismaUI::ViewManager {
 	}
 
 	void SetScrollingPixelSize(const Core::PrismaViewId& viewId, int pixelSize) {
-		std::shared_lock lock(viewsMutex);
+		std::unique_lock lock(viewsMutex);
 		auto it = views.find(viewId);
 		if (it != views.end()) {
 			if (pixelSize <= 0) {
@@ -455,6 +456,13 @@ namespace PrismaUI::ViewManager {
 			try {
 				logger::debug("Destroy: Beginning Ultralight resources cleanup for View [{}]", viewId);
 
+				// Clean up inspector resources first
+				if (viewData->inspectorView) {
+					logger::debug("Destroy: Releasing inspector view for View [{}]", viewId);
+					viewData->inspectorView = nullptr;
+				}
+				Inspector::DestroyInspectorResources(viewData.get());
+
 				if (viewData->ultralightView) {
 					logger::debug("Destroy: Detaching listeners for View [{}]", viewId);
 					viewData->ultralightView->set_load_listener(nullptr);
@@ -539,7 +547,7 @@ namespace PrismaUI::ViewManager {
 	}
 
 	void SetOrder(const Core::PrismaViewId& viewId, int order) {
-		std::shared_lock lock(viewsMutex);
+		std::unique_lock lock(viewsMutex);
 		auto it = views.find(viewId);
 		if (it != views.end()) {
 			it->second->order = order;
@@ -560,25 +568,54 @@ namespace PrismaUI::ViewManager {
 		return -1;
 	}
 
+	// ========== Inspector API Wrappers ==========
+
+	void CreateInspectorView(const Core::PrismaViewId& viewId) {
+		Inspector::CreateInspectorView(viewId);
+	}
+
+	void SetInspectorVisibility(const Core::PrismaViewId& viewId, bool visible) {
+		Inspector::SetInspectorVisibility(viewId, visible);
+	}
+
+	bool IsInspectorVisible(const Core::PrismaViewId& viewId) {
+		return Inspector::IsInspectorVisible(viewId);
+	}
+
+	void SetInspectorBounds(const Core::PrismaViewId& viewId, float topLeftX, float topLeftY, uint32_t width, uint32_t height) {
+		Inspector::SetInspectorBounds(viewId, topLeftX, topLeftY, width, height);
+	}
+
 	bool HasAnyActiveFocus() {
-		std::shared_lock lock(viewsMutex);
-		
-		for (const auto& pair : views) {
-			if (pair.second && pair.second->ultralightView) {
-				auto future = ultralightThread.submit([view_ptr = pair.second->ultralightView]() -> bool {
-					return view_ptr ? view_ptr->HasFocus() : false;
-				});
-				
-				try {
-					if (future.get()) {
-						return true;
-					}
-				} catch (const std::exception& e) {
-					logger::error("HasAnyActiveFocus: Exception checking focus for view: {}", e.what());
+		std::vector<ultralight::RefPtr<ultralight::View>> viewPtrs;
+		{
+			std::shared_lock lock(viewsMutex);
+			for (const auto& pair : views) {
+				if (pair.second && pair.second->ultralightView) {
+					viewPtrs.push_back(pair.second->ultralightView);
 				}
 			}
 		}
 		
-		return false;
+		if (viewPtrs.empty()) {
+			return false;
+		}
+
+		// Submit a single task to check all views on the UI thread
+		auto future = ultralightThread.submit([viewPtrs = std::move(viewPtrs)]() -> bool {
+			for (const auto& view_ptr : viewPtrs) {
+				if (view_ptr && view_ptr->HasFocus()) {
+					return true;
+				}
+			}
+			return false;
+		});
+
+		try {
+			return future.get();
+		} catch (const std::exception& e) {
+			logger::error("HasAnyActiveFocus: Exception checking focus: {}", e.what());
+			return false;
+		}
 	}
 }

@@ -1,10 +1,13 @@
 ﻿#pragma once
 
-#include <Ultralight/Ultralight.h>
-#include <Ultralight/View.h>
-#include <Ultralight/StringSTL.h>
+#pragma warning(push)
+#pragma warning(disable : 4100)
 #include <AppCore/Platform.h>
 #include <JavaScriptCore/JSRetainPtr.h>
+#include <Ultralight/StringSTL.h>
+#include <Ultralight/Ultralight.h>
+#include <Ultralight/View.h>
+#pragma warning(pop)
 
 namespace PrismaUI::Core {
 	typedef uint64_t PrismaViewId;
@@ -12,9 +15,7 @@ namespace PrismaUI::Core {
 }
 
 namespace PrismaUI::Communication {
-	using namespace ultralight;
-
-	void Invoke(const Core::PrismaViewId& viewId, const String& script, std::function<void(std::string)> callback = nullptr);
+	void Invoke(const Core::PrismaViewId& viewId, const ultralight::String& script, std::function<void(std::string)> callback = nullptr);
 	void BindJSCallbacks(const Core::PrismaViewId& viewId);
 	JSValueRef InvokeCppCallback(JSContextRef ctx, JSObjectRef function,
 		JSObjectRef thisObject, size_t argumentCount,

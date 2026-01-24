@@ -11,41 +11,84 @@ Skyrim Next-Gen Web UI Framework.
 
 ## Development
 
-#### Requirements
+### Requirements
 
-- [XMake](https://xmake.io) [2.8.2+]
-- C++23 Compiler (MSVC, Clang-CL)
-
+- [CMake](https://cmake.org/) 4.1+
+- [Ninja](https://ninja-build.org/) (recommended build system)
+- [vcpkg](https://vcpkg.io/) with `VCPKG_ROOT` environment variable set
+- Visual Studio 2022 with C++23 support
+- C++23 Compiler (MSVC)
+- [Ultralight SDK](https://ultralig.ht/download) 1.4.1-dev
+  - place the archive "ultralight-free-sdk-1.4.1-dev-win-x64.7z" in the "external folder.
 ### Getting Started
 
 ```bat
 git clone --recurse-submodules https://github.com/PrismaUI-SKSE/PrismaUI.git
+cd PrismaUI
 ```
 
-### Build
+### Build with CMake
 
-To build the project, run the following command:
+#### Quick Build (Recommended)
+
+Use the helper script to build with optimal settings:
+
+```powershell
+# Release build (default)
+.\BuildRelease.ps1
+
+# Debug build
+.\BuildRelease.ps1 -preset debug
+
+# Customize thread count
+.\BuildRelease.ps1 -preset release -threads 4
+```
+
+> **_Note:_** The script automatically launches the VS Developer Shell and configures the build environment.
+
+#### Manual Build
+
+If you prefer manual CMake commands:
+
+```bat
+# Configure (from VS Developer Command Prompt)
+cmake -S . --preset=release
+
+# Build
+cmake --build --preset=release --parallel 8
+```
+
+Available presets: `debug`, `release`
+
+### Build Output
+
+- **DLL Output**: `build/release/bin/PrismaUI.dll`
+- **Distribution Package**: `dist/PrismaUI_<version>/` (created automatically after build)
+
+### Build with XMake (Alternative)
 
 ```bat
 xmake build
 ```
 
-> **_Note:_** *This will generate a `build/windows/` directory in the **project's root directory** with the build output.*d
+> **_Note:_** This will generate a `build/windows/` directory in the **project's root directory** with the build output.
 
-### Project Generation for Visual Studio
-
-If you want to generate a Visual Studio project, run the following command:
+#### Project Generation for Visual Studio (XMake)
 
 ```bat
 xmake project -k vsxmake
 ```
 
-> **_Note:_** _This will generate a `vsxmakeXXXX/` directory in the **project's root directory** using the latest version of Visual Studio installed on the system._
+> **_Note:_** This will generate a `vsxmakeXXXX/` directory using the latest version of Visual Studio installed on the system.
 
 ### Upgrading Packages (Optional)
 
-If you want to upgrade the project's dependencies, run the following commands:
+**vcpkg:**
+```bat
+vcpkg upgrade
+```
 
+**XMake:**
 ```bat
 xmake repo --update
 xmake require --upgrade

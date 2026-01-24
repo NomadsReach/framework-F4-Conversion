@@ -78,6 +78,18 @@ namespace PRISMA_UI_API
 		// Get view order.
 		virtual int GetOrder(PrismaView view) noexcept = 0;
 
+		// Create inspector view for debugging.
+		virtual void CreateInspectorView(PrismaView view) noexcept = 0;
+
+		// Show or hide the inspector overlay.
+		virtual void SetInspectorVisibility(PrismaView view, bool visible) noexcept = 0;
+
+		// Returns true if inspector is visible.
+		virtual bool IsInspectorVisible(PrismaView view) noexcept = 0;
+
+		// Set inspector window position and size.
+		virtual void SetInspectorBounds(PrismaView view, float topLeftX, float topLeftY, unsigned int width, unsigned int height) noexcept = 0;
+
 		// Returns true if any view has active focus.
 		virtual bool HasAnyActiveFocus() noexcept = 0;
 	};
@@ -92,7 +104,11 @@ namespace PRISMA_UI_API
 	/// <returns>The pointer to the API singleton, or nullptr if request failed</returns>
 	[[nodiscard]] inline void* RequestPluginAPI(const InterfaceVersion a_interfaceVersion = InterfaceVersion::V1)
 	{
-		auto pluginHandle = GetModuleHandle("PrismaUI.dll");
+		auto pluginHandle = GetModuleHandle(L"PrismaUI.dll");
+		if (!pluginHandle) {
+			return nullptr;
+		}
+
 		_RequestPluginAPI requestAPIFunction = (_RequestPluginAPI)GetProcAddress(pluginHandle, "RequestPluginAPI");
 
 		if (requestAPIFunction) {

@@ -166,19 +166,14 @@ namespace WinKeyHandler {
 
 		ev.virtual_key_code = WinKeyToUltralightKey(static_cast<UINT>(wParam));
 
-		ev.key_identifier = "";
-
-		wchar_t name_buffer[256];
-		UINT scan_code = (lParam >> 16) & 0xFF;
-		if (GetKeyNameTextW(static_cast<LONG>(scan_code << 16), name_buffer, _countof(name_buffer)) > 0) {
-			std::wstring ws(name_buffer);
-		}
+		ev.key_identifier = ultralight::String(GetUltralightKeyIdentifier(ev.virtual_key_code).c_str());
 
 		ev.text = "";
 		ev.unmodified_text = "";
 
-		ev.is_keypad = ((HIWORD(lParam) & KF_EXTENDED) == KF_EXTENDED ||
-			(wParam >= VK_NUMPAD0 && wParam <= VK_DIVIDE));
+		// Keypad keys are VK_NUMPAD0-VK_DIVIDE. KF_EXTENDED is set for non-keypad
+		// extended keys (navigation cluster, right Ctrl/Alt), so don't use it here.
+		ev.is_keypad = (wParam >= VK_NUMPAD0 && wParam <= VK_DIVIDE);
 		ev.is_auto_repeat = (HIWORD(lParam) & KF_REPEAT) == KF_REPEAT;
 		ev.is_system_key = (ev.modifiers & ultralight::KeyEvent::kMod_AltKey) &&
 			(wParam == VK_TAB || wParam == VK_ESCAPE || wParam == VK_RETURN || wParam == VK_SPACE ||

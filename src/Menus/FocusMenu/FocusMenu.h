@@ -1,4 +1,8 @@
-﻿class FocusMenu : public RE::IMenu
+﻿#pragma once
+
+#include <RE/Skyrim.h>
+
+class FocusMenu : public RE::IMenu
 {
 public:
 	static constexpr std::string_view MENU_NAME = "PrismaUI_FocusMenu";
@@ -11,6 +15,8 @@ public:
 	static void Open();
 	static void Close();
 	static bool IsOpen();
+
+	bool IsValid() const { return _view != nullptr; }
 
 private:
 	FocusMenu();

@@ -1,10 +1,10 @@
 ﻿-- set minimum xmake version
 set_xmakever("2.8.2")
 
-includes("lib/commonlibsse-ng")
+includes("external/commonlibsse-ng")
 
 set_project("PrismaUI")
-set_version("1.1.1")
+set_version("1.2.0")
 set_license("GPL-3.0")
 
 set_languages("c++23")
@@ -16,9 +16,8 @@ add_rules("mode.release")
 --add_rules("mode.debug", "mode.releasedbg")
 add_rules("plugin.vsxmake.autoupdate")
 
-local ULTRALIGHT_SDK_ROOT = "lib/ultralight"
+local ULTRALIGHT_SDK_ROOT = "external/ultralight-include"
 local ULTRALIGHT_INCLUDE_DIR = ULTRALIGHT_SDK_ROOT .. "/include"
-local ULTRALIGHT_BINARY_DIR = ULTRALIGHT_SDK_ROOT .. "/bin"
 local ULTRALIGHT_LIBRARY_DIR = ULTRALIGHT_SDK_ROOT .. "/lib"
 
 -- targets

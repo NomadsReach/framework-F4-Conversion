@@ -96,15 +96,13 @@ namespace PRISMA_UI_API
 
 	typedef void* (*_RequestPluginAPI)(const InterfaceVersion interfaceVersion);
 
-	/// <summary>
+
 	/// Request the PrismaUI API interface.
 	/// Recommended: Send your request during or after SKSEMessagingInterface::kMessage_PostLoad to make sure the dll has already been loaded
-	/// </summary>
-	/// <param name="a_interfaceVersion">The interface version to request</param>
-	/// <returns>The pointer to the API singleton, or nullptr if request failed</returns>
+
 	[[nodiscard]] inline void* RequestPluginAPI(const InterfaceVersion a_interfaceVersion = InterfaceVersion::V1)
 	{
-		auto pluginHandle = GetModuleHandle(L"PrismaUI.dll");
+		auto pluginHandle = GetModuleHandle(L"PrismaUI.dll"); // if you're getting the wchar error then just replace it by `GetModuleHandle("PrismaUI.dll");`
 		if (!pluginHandle) {
 			return nullptr;
 		}

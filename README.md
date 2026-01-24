@@ -7,6 +7,7 @@ Skyrim Next-Gen Web UI Framework.
 
 ## Contributing Guide
 
+- Use `dev` branch for your pull requests.
 - Feel free to contribute to this project.
 
 ## Development
@@ -119,3 +120,8 @@ This license is designed to keep the framework free for community and small comm
 *   **Publicly release or distribute your own modified versions** of this framework without the author's explicit written permission.
 *   **Use the framework commercially** if your company's revenue or funding is **over US$100,000** (unless you purchase a Pro License from Ultralight, Inc.).
 *   **Reverse-engineer** the included Ultralight SDK components.
+
+## Contributors
+
+- [StarkMP](https://github.com/StarkMP)
+- [langfod](https://github.com/langfod)

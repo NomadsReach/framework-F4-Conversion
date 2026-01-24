@@ -1,7 +1,11 @@
 ﻿#pragma once
 
+#include "Utils/WinKeyHandler/WinKeyHandler.h"
+
+#pragma warning(push)
+#pragma warning(disable : 4100)
 #include <Ultralight/Ultralight.h>
-#include <Utils/WinKeyHandler/WinKeyHandler.h>
+#pragma warning(pop)
 
 #include <map>
 #include <memory>
@@ -18,9 +22,16 @@ namespace PrismaUI::Core {
 namespace PrismaUI::InputHandler {
 	using namespace ultralight;
 
+	// Wrapper for scroll events that includes mouse position for proper routing
+	struct ScrollEventWithPosition {
+		ScrollEvent event;
+		int mouseX;
+		int mouseY;
+	};
+
 	using InputEvent = std::variant<
 		MouseEvent,
-		ScrollEvent,
+		ScrollEventWithPosition,
 		KeyEvent
 	>;
 
@@ -34,7 +45,7 @@ namespace PrismaUI::InputHandler {
 
 	bool IsAnyInputCaptureActive();
 
-	LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+	LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	void ProcessEvents();
 	void Shutdown();
 }

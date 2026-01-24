@@ -7,48 +7,70 @@ Skyrim Next-Gen Web UI Framework.
 
 ## Contributing Guide
 
+- Use `dev` branch for your pull requests.
 - Feel free to contribute to this project.
 
 ## Development
 
-#### Requirements
+### Requirements
 
-- [XMake](https://xmake.io) [2.8.2+]
-- C++23 Compiler (MSVC, Clang-CL)
-
+- [CMake](https://cmake.org/) 4.1+
+- [Ninja](https://ninja-build.org/) (recommended build system)
+- [vcpkg](https://vcpkg.io/) with `VCPKG_ROOT` environment variable set
+- Visual Studio 2022 with C++23 support
+- C++23 Compiler (MSVC)
+- [Ultralight SDK](https://ultralig.ht/download) 1.4.1-dev
+  - place the archive "ultralight-free-sdk-1.4.1-dev-win-x64.7z" in the "external folder.
 ### Getting Started
 
 ```bat
 git clone --recurse-submodules https://github.com/PrismaUI-SKSE/PrismaUI.git
+cd PrismaUI
 ```
 
-### Build
+### Build with CMake
 
-To build the project, run the following command:
+#### Quick Build (Recommended)
+
+Use the helper script to build with optimal settings:
+
+```powershell
+# Release build (default)
+.\BuildRelease.ps1
+
+# Debug build
+.\BuildRelease.ps1 -preset debug
+
+# Customize thread count
+.\BuildRelease.ps1 -preset release -threads 4
+```
+
+> **_Note:_** The script automatically launches the VS Developer Shell and configures the build environment.
+
+#### Manual Build
+
+If you prefer manual CMake commands:
 
 ```bat
-xmake build
+# Configure (from VS Developer Command Prompt)
+cmake -S . --preset=release
+
+# Build
+cmake --build --preset=release --parallel 8
 ```
 
-> **_Note:_** *This will generate a `build/windows/` directory in the **project's root directory** with the build output.*d
+Available presets: `debug`, `release`
 
-### Project Generation for Visual Studio
+### Build Output
 
-If you want to generate a Visual Studio project, run the following command:
-
-```bat
-xmake project -k vsxmake
-```
-
-> **_Note:_** _This will generate a `vsxmakeXXXX/` directory in the **project's root directory** using the latest version of Visual Studio installed on the system._
+- **DLL Output**: `build/release/bin/PrismaUI.dll`
+- **Distribution Package**: `dist/PrismaUI_<version>/` (created automatically after build)
 
 ### Upgrading Packages (Optional)
 
-If you want to upgrade the project's dependencies, run the following commands:
-
+**vcpkg:**
 ```bat
-xmake repo --update
-xmake require --upgrade
+vcpkg upgrade
 ```
 
 ## Dependencies / Acknowledgments
@@ -76,3 +98,8 @@ This license is designed to keep the framework free for community and small comm
 *   **Publicly release or distribute your own modified versions** of this framework without the author's explicit written permission.
 *   **Use the framework commercially** if your company's revenue or funding is **over US$100,000** (unless you purchase a Pro License from Ultralight, Inc.).
 *   **Reverse-engineer** the included Ultralight SDK components.
+
+## Contributors
+
+- [StarkMP](https://github.com/StarkMP)
+- [langfod](https://github.com/langfod)

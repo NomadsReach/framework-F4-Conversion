@@ -1,48 +1,60 @@
-﻿#include <Menus/CursorMenu/CursorMenu.h>
-#include <PrismaUI_API.h>
-#include <API/API.h>
+﻿#include "API/API.h"
+#include "Menus/CursorMenu/CursorMenu.h"
+#include "PrismaUI_API.h"
+#include "Utils/DllLoader.h"
+#include <spdlog/sinks/basic_file_sink.h>
 
-static void SKSEMessageHandler(SKSE::MessagingInterface::Message* message)
-{
-    switch (message->type) {
-    case SKSE::MessagingInterface::kDataLoaded:
-        CursorMenuEx::InstallHook();
-        break;
-    }
+static void SKSEMessageHandler(SKSE::MessagingInterface::Message *message) {
+  switch (message->type) {
+  case SKSE::MessagingInterface::kDataLoaded:
+    CursorMenuEx::InstallHook();
+    break;
+  }
 }
 
-extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
-{
-    REL::Module::reset();
+extern "C" DLLEXPORT bool SKSEAPI
+SKSEPlugin_Load(const SKSE::LoadInterface *a_skse) {
 
-    auto g_messaging = reinterpret_cast<SKSE::MessagingInterface*>(a_skse->QueryInterface(SKSE::LoadInterface::kMessaging));
+  SKSE::Init(a_skse, false); // false = don't initialize logger by default
+  logger::init();
+  // pattern: [2024-01-01 12:00:00.000] [info] [1234] [sourcefile.cpp:123] Log message
+  spdlog::set_pattern("[%Y-%m-%d %T.%e] [%l] [%t] [%s:%#] %v");
+
+  logger::info("---------------- {} {} by {} ----------------", SKSE::GetPluginName(), SKSE::GetPluginVersion(), SKSE::GetPluginAuthor());
+  logger::info("-------------------- Docs and Guides: https://prismaui.dev -------------------");
+  
+  // Load Ultralight DLLs from Data/PrismaUI/libs before any Ultralight API usage
+  if (!PrismaUI::Utils::DllLoader::GetSingleton().LoadUltralightLibraries()) {
+    logger::critical("Failed to load Ultralight libraries! Plugin will not load.");
+    return false;
+  }
+
+  auto g_messaging = reinterpret_cast<SKSE::MessagingInterface *>(
+      a_skse->QueryInterface(SKSE::LoadInterface::kMessaging));
 
     if (!g_messaging) {
         logger::critical("Failed to load messaging interface! This error is fatal, plugin will not load.");
         return false;
     }
-    
-    SKSE::Init(a_skse);
-    logger::info("---------------- PrismaUI 1.1.0 by StarkMP <discord: starkmp> ----------------");
-    logger::info("-------------------- Docs and Guides: https://prismaui.dev -------------------");
+
     SKSE::AllocTrampoline(1 << 10);
 
     g_messaging->RegisterListener("SKSE", SKSEMessageHandler);
 
-    return true;
+  return true;
 }
 
-extern "C" DLLEXPORT void* SKSEAPI RequestPluginAPI(const PRISMA_UI_API::InterfaceVersion a_interfaceVersion)
-{
-    auto api = PluginAPI::PrismaUIInterface::GetSingleton();
+extern "C" DLLEXPORT void *SKSEAPI
+RequestPluginAPI(const PRISMA_UI_API::InterfaceVersion a_interfaceVersion) {
+  auto api = PluginAPI::PrismaUIInterface::GetSingleton();
 
-    switch (a_interfaceVersion) {
-    case PRISMA_UI_API::InterfaceVersion::V1:
-        logger::info("RequestPluginAPI returned the API singleton");
-        return static_cast<void*>(api);
-    }
+  switch (a_interfaceVersion) {
+  case PRISMA_UI_API::InterfaceVersion::V1:
+    logger::info("RequestPluginAPI returned the API singleton");
+    return static_cast<void *>(api);
+  }
 
-    logger::info("RequestPluginAPI requested the wrong interface version");
+  logger::info("RequestPluginAPI requested the wrong interface version");
 
-    return nullptr;
+  return nullptr;
 }

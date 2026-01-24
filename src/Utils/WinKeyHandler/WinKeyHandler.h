@@ -1,6 +1,9 @@
 ﻿#pragma once
 
+#pragma warning(push)
+#pragma warning(disable : 4100)
 #include <Ultralight/Ultralight.h>
+#pragma warning(pop)
 
 namespace WinKeyHandler {
 	using namespace ultralight::KeyCodes;

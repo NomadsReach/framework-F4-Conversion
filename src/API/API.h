@@ -1,6 +1,6 @@
 ﻿#pragma once
 
-#include <PrismaUI_API.h>
+#include "PrismaUI_API.h"
 
 class PluginAPI
 {
@@ -27,7 +27,7 @@ public:
 		virtual void InteropCall(PrismaView view, const char* functionName, const char* argument) noexcept override;
 		virtual void RegisterJSListener(PrismaView view, const char* fnName, PRISMA_UI_API::JSListenerCallback callback) noexcept override;
 		virtual bool HasFocus(PrismaView view) noexcept override;
-		virtual bool Focus(PrismaView view, bool pauseGame = false) noexcept override;
+		virtual bool Focus(PrismaView view, bool pauseGame = false, bool disableFocusMenu = false) noexcept override;
 		virtual void Unfocus(PrismaView view) noexcept override;
 		virtual void Show(PrismaView view) noexcept override;
 		virtual void Hide(PrismaView view) noexcept override;
@@ -38,6 +38,13 @@ public:
 		virtual void Destroy(PrismaView view) noexcept override;
 		virtual void SetOrder(PrismaView view, int order) noexcept override;
 		virtual int GetOrder(PrismaView view) noexcept override;
+		virtual bool HasAnyActiveFocus() noexcept override;
+
+		// Inspector methods
+		virtual void CreateInspectorView(PrismaView view) noexcept override;
+		virtual void SetInspectorVisibility(PrismaView view, bool visible) noexcept override;
+		virtual bool IsInspectorVisible(PrismaView view) noexcept override;
+		virtual void SetInspectorBounds(PrismaView view, float topLeftX, float topLeftY, unsigned int width, unsigned int height) noexcept override;
 
 	private:
 		unsigned long apiTID = 0;

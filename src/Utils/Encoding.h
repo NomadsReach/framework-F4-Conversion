@@ -4,7 +4,7 @@
 #include <vector>
 #include <windows.h>
 
-bool isValidUTF8(const char* str)
+inline bool isValidUTF8(const char* str)
 {
     if (!str) {
         return true;
@@ -13,7 +13,7 @@ bool isValidUTF8(const char* str)
     return len != 0;
 }
 
-std::string convertFromANSIToUTF8(const char* str)
+inline std::string convertFromANSIToUTF8(const char* str)
 {
     if (!str) {
         return "";
@@ -21,14 +21,14 @@ std::string convertFromANSIToUTF8(const char* str)
 
     int wide_char_len = MultiByteToWideChar(CP_ACP, 0, str, -1, NULL, 0);
     if (wide_char_len == 0) {
-        return str;
+        return "";  // Conversion failed - return empty rather than invalid encoding
     }
     std::vector<wchar_t> wide_char_buffer(wide_char_len);
     MultiByteToWideChar(CP_ACP, 0, str, -1, wide_char_buffer.data(), wide_char_len);
 
     int utf8_len = WideCharToMultiByte(CP_UTF8, 0, wide_char_buffer.data(), -1, NULL, 0, NULL, NULL);
     if (utf8_len == 0) {
-        return str;
+        return "";  // Conversion failed - return empty rather than invalid encoding
     }
     std::vector<char> utf8_buffer(utf8_len);
     WideCharToMultiByte(CP_UTF8, 0, wide_char_buffer.data(), -1, utf8_buffer.data(), utf8_len, NULL, NULL);

@@ -1,10 +1,10 @@
 #pragma once
 
-#include <functional>
-#include <queue>
-#include <mutex>
-#include <memory>
 #include <atomic>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <queue>
 
 namespace PrismaUI::Core {
 	typedef uint64_t PrismaViewId;

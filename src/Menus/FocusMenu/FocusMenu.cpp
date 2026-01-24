@@ -2,7 +2,12 @@
 
 RE::stl::owner<RE::IMenu*> FocusMenu::Creator()
 {
-	return new FocusMenu();
+	auto menu = new FocusMenu();
+	if (!menu->IsValid()) {
+		delete menu;
+		return nullptr;
+	}
+	return menu;
 }
 
 FocusMenu::FocusMenu()
@@ -11,7 +16,17 @@ FocusMenu::FocusMenu()
 	using MenuFlag = RE::UI_MENU_FLAGS;
 
 	auto scaleformManager = RE::BSScaleformManager::GetSingleton();
-	const bool success = scaleformManager->LoadMovieEx(this, "cursormenu", [](RE::GFxMovieDef* a_def) -> void {});
+	if (!scaleformManager) {
+		logger::error("FocusMenu: BSScaleformManager singleton is null");
+		return;
+	}
+
+	const bool success = scaleformManager->LoadMovieEx(this, "cursormenu", []([[maybe_unused]] RE::GFxMovieDef* a_def) -> void {});
+
+	if (!success || !this->uiMovie) {
+		logger::error("FocusMenu: Failed to load cursormenu movie");
+		return;
+	}
 
 	_view = this->uiMovie;
 	_view->SetMouseCursorCount(1);
@@ -28,7 +43,7 @@ FocusMenu::FocusMenu()
 	this->inputContext = Context::kMenuMode;
 }
 
-void FocusMenu::AdvanceMovie(float a_interval, std::uint32_t a_currentTime) {
+void FocusMenu::AdvanceMovie([[maybe_unused]] float a_interval, [[maybe_unused]] std::uint32_t a_currentTime) {
 }
 
 RE::UI_MESSAGE_RESULTS FocusMenu::ProcessMessage(RE::UIMessage& a_message)

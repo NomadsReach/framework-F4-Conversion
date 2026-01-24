@@ -1,10 +1,13 @@
 ﻿#pragma once
 
-#include <Ultralight/Ultralight.h>
-#include <Ultralight/View.h>
-#include <Ultralight/StringSTL.h>
+#pragma warning(push)
+#pragma warning(disable : 4100)
 #include <AppCore/Platform.h>
 #include <JavaScriptCore/JSRetainPtr.h>
+#include <Ultralight/StringSTL.h>
+#include <Ultralight/Ultralight.h>
+#include <Ultralight/View.h>
+#pragma warning(pop)
 
 namespace PrismaUI::Core {
 	typedef uint64_t PrismaViewId;
@@ -35,6 +38,7 @@ namespace PrismaUI::Listeners {
 		virtual ~MyViewListener();
 
 		virtual void OnAddConsoleMessage(View* caller, const ConsoleMessage& message) override;
+		virtual RefPtr<View> OnCreateInspectorView(View* caller, bool is_local, const String& inspectedURL) override;
 	};
 
 	class MyUltralightLogger : public Logger {

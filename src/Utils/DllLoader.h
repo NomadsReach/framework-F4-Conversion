@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <Windows.h>
 #include <filesystem>
@@ -74,7 +74,7 @@ namespace PrismaUI::Utils
             }
 
             m_loaded = true;
-            logger::info("All Ultralight DLLs loaded successfully from: {}", libsPath.string());
+            logger::info("All Ultralight DLLs loaded successfully!");
             return true;
         }
 

@@ -27,7 +27,6 @@ namespace PrismaUI::Core {
 	ID3D11Device* d3dDevice = nullptr;
 	ID3D11DeviceContext* d3dContext = nullptr;
 	HWND hWnd = nullptr;
-	WNDPROC s_originalWndProc = nullptr;
 	RE::BSGraphics::ScreenSize screenSize;
 
 	std::unique_ptr<DirectX::SpriteBatch> spriteBatch;
@@ -107,22 +106,21 @@ namespace PrismaUI::Core {
 		if (!hWnd && runtimeData.renderWindows && runtimeData.renderWindows->hWnd) {
 			hWnd = reinterpret_cast<HWND>(runtimeData.renderWindows->hWnd);
 			screenSize = renderManager->GetScreenSize();
-			if (!s_originalWndProc && hWnd) {
-				s_originalWndProc = (WNDPROC)SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)PrismaUI::InputHandler::HookedWndProc);
-				if (s_originalWndProc) {
-					logger::debug("WndProc hook installed via SetWindowLongPtr.");
-					static std::atomic<bool> input_handler_initialized = false;
-					bool expected_ih_init = false;
+			
+			static std::atomic<bool> input_handler_initialized = false;
+			bool expected_ih_init = false;
 
-					if (input_handler_initialized.compare_exchange_strong(expected_ih_init, true)) {
-						Initialize(hWnd, &ultralightThread, &views, &viewsMutex);
-						SetOriginalWndProc(s_originalWndProc);
-						logger::debug("PrismaUI::InputHandler initialized and original WndProc passed.");
+			if (input_handler_initialized.compare_exchange_strong(expected_ih_init, true)) {
+				Initialize(hWnd, &ultralightThread, &views, &viewsMutex);
+				
+				// Schedule WndProc hook installation on the main thread (required for SetWindowSubclass)
+				SKSE::GetTaskInterface()->AddTask([]() {
+					if (InstallWndProcHook()) {
+						logger::info("WndProc hook installed successfully.");
+					} else {
+						logger::error("Failed to install WndProc hook!");
 					}
-				}
-				else {
-					logger::error("Failed to install WndProc hook! GetLastError() = {}", GetLastError());
-				}
+				});
 			}
 		}
 		else if (!hWnd) {
@@ -305,11 +303,6 @@ namespace PrismaUI::Core {
 		commonStates.reset();
 		logger::debug("DirectXTK resources released.");
 
-		if (s_originalWndProc && hWnd) {
-			SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)s_originalWndProc);
-			logger::info("WndProc hook removed.");
-			s_originalWndProc = nullptr;
-		}
 		InputHandler::Shutdown();
 
 		d3dDevice = nullptr;

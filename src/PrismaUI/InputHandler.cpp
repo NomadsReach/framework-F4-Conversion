@@ -48,7 +48,7 @@ namespace PrismaUI::InputHandler {
             return true;
         }
 
-        logger::error("Failed to initialize common controls: {}", GetLastError());
+        logger::warning("Failed to initialize common controls: {}", GetLastError());
         return false;
     }
 

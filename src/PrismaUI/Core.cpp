@@ -85,7 +85,7 @@ namespace PrismaUI::Core {
 		auto ui = RE::UI::GetSingleton();
 		ui->Register(FocusMenu::MENU_NAME, FocusMenu::Creator);
 
-		logger::info("PrismaUI Core System Initialized. Base Path {}", basePath.string());
+		logger::info("PrismaUI Core System Initialized.");
 	}
 
 	void InitHooks() {

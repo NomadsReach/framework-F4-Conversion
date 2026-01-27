@@ -18,7 +18,7 @@ set(CMAKE_JOB_POOL_COMPILE compile)
 set(CMAKE_JOB_POOL_LINK link)
 set(CMAKE_INSTALL_MESSAGE LAZY)
 
-project(PrismaUI VERSION 1.2.0 LANGUAGES CXX)
+project(PrismaUI VERSION 1.2.1 LANGUAGES CXX)
 
 # Set build root for external builds
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
@@ -72,6 +72,7 @@ target_link_libraries(${PROJECT_NAME}
     Ultralight
     UltralightCore
     WebCore
+    comctl32  # Required for SetWindowSubclass/RemoveWindowSubclass
 )
 
 # Delay-load Ultralight DLLs so they can be loaded from custom path at runtime

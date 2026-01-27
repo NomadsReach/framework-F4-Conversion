@@ -36,7 +36,6 @@ namespace PrismaUI::InputHandler {
 	>;
 
 	void Initialize(HWND gameHwnd, SingleThreadExecutor* coreExecutor, std::map<Core::PrismaViewId, std::shared_ptr<Core::PrismaView>>* viewsMap, std::shared_mutex* viewsMapMutex);
-	void SetOriginalWndProc(WNDPROC originalProc);
 
 	void EnableInputCapture(const Core::PrismaViewId& viewId);
 	void DisableInputCapture(const Core::PrismaViewId& viewId);
@@ -45,7 +44,9 @@ namespace PrismaUI::InputHandler {
 
 	bool IsAnyInputCaptureActive();
 
-	LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+	bool InstallWndProcHook();
+	void UninstallWndProcHook();
+
 	void ProcessEvents();
 	void Shutdown();
 }

@@ -1,12 +1,15 @@
 ﻿#include "InputHandler.h"
 #include "Core.h"
 #include "ViewManager.h"
+#include "Utils/Encoding.h"
+
+#include <commctrl.h>
+#pragma comment(lib, "comctl32.lib")
 
 namespace PrismaUI::InputHandler {
 	using namespace Core;
 
     HWND g_hWnd = nullptr;
-    WNDPROC g_originalWndProc = nullptr;
     SingleThreadExecutor* g_ultralightThreadExecutor = nullptr;
     std::map<Core::PrismaViewId, std::shared_ptr<Core::PrismaView>>* g_viewsMap = nullptr;
     std::shared_mutex* g_viewsMapMutex = nullptr;
@@ -22,6 +25,32 @@ namespace PrismaUI::InputHandler {
     const int SCROLL_LINES_PER_WHEEL_DELTA = 1;
 
     bool g_mouseButtonStates[3] = { false, false, false };
+
+    // WndProc subclass state
+    static std::atomic<bool> g_wndProcInstalled = false;
+    static std::atomic<bool> g_commonControlsInit = false;
+    static constexpr UINT_PTR SUBCLASS_ID = 0x505249534D41; // "PRISMA" in hex
+    static std::mutex g_wndProcMutex;  // Thread-safe installation
+
+    bool EnsureCommonControlsInitialized()
+    {
+        if (g_commonControlsInit.load()) {
+            return true;
+        }
+
+        INITCOMMONCONTROLSEX icc = {};
+        icc.dwSize = sizeof(icc);
+        icc.dwICC = ICC_STANDARD_CLASSES;
+
+        if (InitCommonControlsEx(&icc)) {
+            g_commonControlsInit.store(true);
+            logger::debug("Common controls initialized");
+            return true;
+        }
+
+        logger::warning("Failed to initialize common controls: {}", GetLastError());
+        return false;
+    }
 
     class MouseEventListener : public RE::BSTEventSink<RE::InputEvent*> {
     public:
@@ -148,6 +177,123 @@ namespace PrismaUI::InputHandler {
         }
     };
 
+    LRESULT CALLBACK SubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+        if (g_isAnyInputCaptureActive.load()) {
+            bool handledByUI = false;
+            Core::PrismaViewId focusedViewIdCopy;
+            {
+                std::lock_guard lock(g_focusedViewIdMutex);
+                focusedViewIdCopy = g_currentlyFocusedViewId;
+            }
+
+            if (focusedViewIdCopy != 0) {
+                switch (uMsg) {
+                case WM_KEYDOWN: {
+                    ultralight::KeyEvent keyDownEvent = WinKeyHandler::CreateKeyEvent(
+                        ultralight::KeyEvent::kType_RawKeyDown,
+                        wParam,
+                        lParam
+                    );
+                    {
+                        std::lock_guard lock(g_eventQueueMutex);
+                        g_eventQueue.emplace_back(keyDownEvent);
+                    }
+                    handledByUI = true;
+
+                    BYTE kbdState[256];
+                    GetKeyboardState(kbdState);
+                    HKL currentLayout = GetKeyboardLayout(GetWindowThreadProcessId(hwnd, NULL));
+
+                    wchar_t translatedChars[5] = { 0 };
+                    int charCount = ToUnicodeEx(
+                        (UINT)wParam,
+                        ((lParam >> 16) & 0xFF),
+                        kbdState,
+                        translatedChars,
+                        4,
+                        0,
+                        currentLayout
+                    );
+
+                    if (charCount > 0) {
+                        bool viewHasInputFieldFocus = ViewManager::ViewHasInputFocus(focusedViewIdCopy);
+                        if (viewHasInputFieldFocus) {
+                            for (int i = 0; i < charCount; ++i) {
+                                wchar_t ch = translatedChars[i];
+                                if (ch >= 0x20 || ch == '\t') {
+                                    ultralight::KeyEvent charEvent;
+                                    charEvent.type = ultralight::KeyEvent::kType_Char;
+                                    WinKeyHandler::GetUltralightModifiers(charEvent);
+
+                                    wchar_t single_char_str[2] = { ch, 0 };
+                                    char utf8_buffer[8] = { 0 };
+                                    int utf8_len = WideCharToMultiByte(
+                                        CP_UTF8, 0, single_char_str, -1,
+                                        utf8_buffer, sizeof(utf8_buffer),
+                                        nullptr, nullptr
+                                    );
+                                    std::string narrow_string = (utf8_len > 0) ?
+                                        std::string(utf8_buffer) : std::string();
+                                    ultralight::String ul_text = ultralight::Convert(narrow_string);
+
+                                    charEvent.text = ul_text;
+                                    charEvent.unmodified_text = ul_text;
+                                    charEvent.virtual_key_code = ultralight::KeyCodes::GK_UNKNOWN;
+                                    charEvent.key_identifier = "";
+                                    charEvent.is_auto_repeat = (HIWORD(lParam) & KF_REPEAT) == KF_REPEAT;
+                                    {
+                                        std::lock_guard lock(g_eventQueueMutex);
+                                        g_eventQueue.emplace_back(charEvent);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+                case WM_KEYUP: {
+                    ultralight::KeyEvent ev = WinKeyHandler::CreateKeyEvent(
+                        ultralight::KeyEvent::kType_KeyUp,
+                        wParam,
+                        lParam
+                    );
+                    {
+                        std::lock_guard lock(g_eventQueueMutex);
+                        g_eventQueue.emplace_back(ev);
+                    }
+                    handledByUI = true;
+                    break;
+                }
+                case WM_CHAR: {
+                    bool viewHasInputFieldFocus = ViewManager::ViewHasInputFocus(focusedViewIdCopy);
+                    if (viewHasInputFieldFocus) {
+                        handledByUI = true;
+                    }
+                    break;
+                }
+                default:
+                    break;
+                }
+            }
+
+            if (handledByUI) {
+                return 0;
+            }
+        }
+
+        // Handle window destruction - clean up subclass
+        if (uMsg == WM_NCDESTROY) {
+            RemoveWindowSubclass(hwnd, SubclassProc, uIdSubclass);
+            if (uIdSubclass == SUBCLASS_ID) {
+                g_wndProcInstalled.store(false);
+            }
+        }
+
+        // Pass to next handler in the chain using DefSubclassProc
+        // This properly handles the chain even if other mods are in the stack
+        return DefSubclassProc(hwnd, uMsg, wParam, lParam);
+    }
+
     void Initialize(HWND gameHwnd, SingleThreadExecutor* coreExecutor, std::map<Core::PrismaViewId, std::shared_ptr<Core::PrismaView>>* viewsMap, std::shared_mutex* viewsMapMutex) {
         g_hWnd = gameHwnd;
         g_ultralightThreadExecutor = coreExecutor;
@@ -163,6 +309,9 @@ namespace PrismaUI::InputHandler {
 
         logger::info("PrismaUI::InputHandler Initialized with HWND: {}", (void*)g_hWnd);
 
+        // Initialize Common Controls early (required for SetWindowSubclass)
+        EnsureCommonControlsInitialized();
+
         auto inputEventSource = RE::BSInputDeviceManager::GetSingleton();
         if (inputEventSource) {
             inputEventSource->AddEventSink(MouseEventListener::GetSingleton());
@@ -173,9 +322,57 @@ namespace PrismaUI::InputHandler {
         }
     }
 
-    void SetOriginalWndProc(WNDPROC originalProc) {
-        g_originalWndProc = originalProc;
-        logger::info("PrismaUI::InputHandler Original WndProc set.");
+    bool InstallWndProcHook() {
+        std::lock_guard<std::mutex> lock(g_wndProcMutex);
+
+        if (g_wndProcInstalled.load()) {
+            logger::debug("WndProc subclass already installed");
+            return true;
+        }
+
+        if (!g_hWnd) {
+            logger::error("Cannot install WndProc subclass: HWND is null");
+            return false;
+        }
+
+        // Check if HWND is valid
+        if (!IsWindow(g_hWnd)) {
+            logger::error("HWND {:p} is not a valid window", (void*)g_hWnd);
+            return false;
+        }
+
+        // Initialize Common Controls (required for SetWindowSubclass)
+        if (!EnsureCommonControlsInitialized()) {
+            logger::warn("Common controls initialization failed, trying subclass anyway...");
+        }
+
+        logger::debug("Attempting to install subclass on HWND: {:p}", (void*)g_hWnd);
+
+        // Clear last error before calling
+        SetLastError(0);
+
+        if (!SetWindowSubclass(g_hWnd, SubclassProc, SUBCLASS_ID, 0)) {
+            DWORD err = GetLastError();
+            logger::error("Failed to install WndProc subclass. Error: {} (0x{:X})", err, err);
+            return false;
+        }
+
+        g_wndProcInstalled.store(true);
+        logger::info("WndProc subclass installed successfully on HWND: {:p}", (void*)g_hWnd);
+        return true;
+    }
+
+    void UninstallWndProcHook() {
+        std::lock_guard<std::mutex> lock(g_wndProcMutex);
+
+        if (!g_wndProcInstalled.exchange(false)) {
+            return;
+        }
+
+        if (g_hWnd) {
+            RemoveWindowSubclass(g_hWnd, SubclassProc, SUBCLASS_ID);
+            logger::info("WndProc subclass removed");
+        }
     }
 
     void EnableInputCapture(const Core::PrismaViewId& viewId) {
@@ -262,102 +459,6 @@ namespace PrismaUI::InputHandler {
         }
         if (viewId == 0) return g_isAnyInputCaptureActive.load();
         return g_isAnyInputCaptureActive.load() && (currentFocused == viewId);
-    }
-
-    LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-        if (!g_originalWndProc && uMsg != WM_NCDESTROY && uMsg != WM_CREATE) {
-            return DefWindowProc(hwnd, uMsg, wParam, lParam);
-        }
-
-        if (uMsg == WM_NCHITTEST) {
-            if (g_originalWndProc) return CallWindowProc(g_originalWndProc, hwnd, uMsg, wParam, lParam);
-            return DefWindowProc(hwnd, uMsg, wParam, lParam);
-        }
-
-        if (g_isAnyInputCaptureActive.load()) {
-            bool handledByUI = false;
-            Core::PrismaViewId focusedViewIdCopy;
-            {
-                std::lock_guard lock(g_focusedViewIdMutex);
-                focusedViewIdCopy = g_currentlyFocusedViewId;
-            }
-
-            switch (uMsg) {
-            case WM_KEYDOWN: {
-                if (focusedViewIdCopy != 0) {
-                    ultralight::KeyEvent keyDownEvent = WinKeyHandler::CreateKeyEvent(ultralight::KeyEvent::kType_RawKeyDown, wParam, lParam);
-                    { std::lock_guard lock(g_eventQueueMutex); g_eventQueue.emplace_back(keyDownEvent); }
-                    handledByUI = true;
-
-                    BYTE kbdState[256];
-                    GetKeyboardState(kbdState);
-                    HKL currentLayout = GetKeyboardLayout(GetWindowThreadProcessId(hwnd, NULL));
-
-                    wchar_t translatedChars[5] = { 0 };
-                    int charCount = ToUnicodeEx((UINT)wParam, ((lParam >> 16) & 0xFF), kbdState, translatedChars, 4, 0, currentLayout);
-
-                    if (charCount > 0) {
-                        bool viewHasInputFieldFocus = ViewManager::ViewHasInputFocus(focusedViewIdCopy);
-                        if (viewHasInputFieldFocus) {
-                            for (int i = 0; i < charCount; ++i) {
-                                wchar_t ch = translatedChars[i];
-                                if (ch >= 0x20 || ch == '\t') {
-                                    ultralight::KeyEvent charEvent;
-                                    charEvent.type = ultralight::KeyEvent::kType_Char;
-                                    WinKeyHandler::GetUltralightModifiers(charEvent);
-
-                                    wchar_t single_char_str[2] = { ch, 0 };
-                                    char utf8_buffer[8] = { 0 };
-                                    int utf8_len = WideCharToMultiByte(CP_UTF8, 0, single_char_str, -1, utf8_buffer, sizeof(utf8_buffer), nullptr, nullptr);
-                                    std::string narrow_string = (utf8_len > 0) ? std::string(utf8_buffer) : std::string();
-                                    ultralight::String ul_text = ultralight::Convert(narrow_string);
-
-                                    charEvent.text = ul_text;
-                                    charEvent.unmodified_text = ul_text;
-                                    charEvent.virtual_key_code = ultralight::KeyCodes::GK_UNKNOWN;
-                                    charEvent.key_identifier = "";
-                                    charEvent.is_auto_repeat = (HIWORD(lParam) & KF_REPEAT) == KF_REPEAT;
-                                    { std::lock_guard lock(g_eventQueueMutex); g_eventQueue.emplace_back(charEvent); }
-                                }
-                            }
-                        }
-                    }
-                }
-                break;
-            }
-            case WM_KEYUP: {
-                if (focusedViewIdCopy != 0) {
-                    ultralight::KeyEvent ev = WinKeyHandler::CreateKeyEvent(ultralight::KeyEvent::kType_KeyUp, wParam, lParam);
-                    { std::lock_guard lock(g_eventQueueMutex); g_eventQueue.emplace_back(ev); }
-                    handledByUI = true;
-                }
-                break;
-            }
-            case WM_CHAR: {
-                Core::PrismaViewId focusedViewIdCopyLocal;
-                { std::lock_guard lock(g_focusedViewIdMutex); focusedViewIdCopyLocal = g_currentlyFocusedViewId; }
-
-                if (focusedViewIdCopyLocal != 0) {
-                    bool viewHasInputFieldFocus = ViewManager::ViewHasInputFocus(focusedViewIdCopyLocal);
-                    if (viewHasInputFieldFocus) {
-                        handledByUI = true;
-                    }
-                }
-                break;
-            }
-            default:
-                break;
-            }
-
-            if (handledByUI) {
-                return 0;
-            }
-        }
-
-        if (g_originalWndProc) {
-            return CallWindowProc(g_originalWndProc, hwnd, uMsg, wParam, lParam);
-        }
-        return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
 
     void ProcessEvents() {
@@ -478,8 +579,9 @@ namespace PrismaUI::InputHandler {
             logger::debug("MouseEventListener removed from BSInputDeviceManager");
         }
 
+        UninstallWndProcHook();
+
         g_hWnd = nullptr;
-        g_originalWndProc = nullptr;
         g_ultralightThreadExecutor = nullptr;
         g_viewsMap = nullptr;
         g_viewsMapMutex = nullptr;

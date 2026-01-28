@@ -156,7 +156,7 @@ namespace PrismaUI::InputHandler {
         }
     };
 
-    LRESULT CALLBACK SubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    LRESULT CALLBACK SubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR /*dwRefData*/) {
         if (g_isAnyInputCaptureActive.load()) {
             bool handledByUI = false;
             Core::PrismaViewId focusedViewIdCopy;

@@ -5,8 +5,19 @@ set(CommonLibPath "external/commonlibsse-ng")
 set(CommonLibName "CommonLibSSE")
 
 # Read CommonLibSSE version from vcpkg.json
-file(READ "${CMAKE_SOURCE_DIR}/${CommonLibPath}/vcpkg.json" VCPKG_JSON_CONTENT)
-string(JSON COMMONLIBSSE_VERSION GET "${VCPKG_JSON_CONTENT}" "version-semver")
+set(COMMONLIB_VCPKG_JSON_PATH "${CMAKE_SOURCE_DIR}/${CommonLibPath}/vcpkg.json")
+if(NOT EXISTS "${COMMONLIB_VCPKG_JSON_PATH}")
+    message(FATAL_ERROR
+        "CommonLibSSE-NG vcpkg.json not found at \"${COMMONLIB_VCPKG_JSON_PATH}\". "
+        "Ensure the CommonLibSSE-NG submodule is checked out and includes vcpkg.json with a \"version-semver\" field.")
+endif()
+file(READ "${COMMONLIB_VCPKG_JSON_PATH}" COMMONLIB_VCPKG_JSON_CONTENT)
+string(JSON COMMONLIBSSE_VERSION ERROR_VARIABLE _COMMONLIBSSE_VERSION_JSON_ERROR GET "${COMMONLIB_VCPKG_JSON_CONTENT}" "version-semver")
+if(_COMMONLIBSSE_VERSION_JSON_ERROR)
+    message(FATAL_ERROR
+        "Failed to extract \"version-semver\" from \"${COMMONLIB_VCPKG_JSON_PATH}\": ${_COMMONLIBSSE_VERSION_JSON_ERROR}")
+endif()
+message(STATUS "Configuring CommonLibSSE-NG version ${COMMONLIBSSE_VERSION}")
 set(COMMONLIBSSE_VERSION "${COMMONLIBSSE_VERSION}" CACHE STRING "CommonLibSSE-NG version" FORCE)
 
 # Save original build type

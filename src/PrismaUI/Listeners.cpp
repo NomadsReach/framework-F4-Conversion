@@ -24,11 +24,13 @@ namespace PrismaUI::Listeners {
 
 	void MyLoadListener::OnFinishLoading(View* caller, uint64_t frame_id, bool is_main_frame, const String& url) {
 		logger::info("View [{}]: LoadListener: Finished loading URL: {}", viewId_, url.utf8().data());
-		ultralightThread.submit([id = viewId_] {
+		ultralightThread.submit([id = viewId_, urlStr = std::string(url.utf8().data())] {
 			std::shared_lock lock(viewsMutex);
 			auto it = views.find(id);
 			if (it != views.end()) {
 				it->second->isLoadingFinished = true;
+				it->second->lastLoadedUrl = urlStr;  // Track for recovery
+				it->second->recoveryAttempts = 0;    // Reset recovery counter on successful load
 				Communication::BindJSCallbacks(id);
 			}
 		});

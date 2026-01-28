@@ -37,6 +37,7 @@ namespace PrismaUI::ViewManager {
 		viewData->id = newViewId;
 		viewData->ultralightView = nullptr;
 		viewData->htmlPathToLoad = fileUrl;
+		viewData->originalUrl = fileUrl;  // Store for recovery after exceptions
 		viewData->isHidden = false;
 		viewData->domReadyCallback = onDomReadyCallback;
 

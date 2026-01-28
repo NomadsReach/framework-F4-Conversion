@@ -7,7 +7,74 @@
 #include "ViewOperationQueue.h"
 #include "ViewRenderer.h"
 #include "Utils/DllLoader.h"
+#include <eh.h>  // For _set_se_translator
 
+namespace {
+	// SEH exception class to convert structured exceptions to C++ exceptions
+	// Copies all relevant data from EXCEPTION_POINTERS since that pointer is only valid during the translator call
+	class SEHException : public std::exception {
+	public:
+		SEHException(unsigned int code, EXCEPTION_POINTERS* ep) 
+			: code_(code), address_(nullptr), accessType_(0), accessAddress_(0) {
+			if (ep && ep->ExceptionRecord) {
+				address_ = ep->ExceptionRecord->ExceptionAddress;
+				// For access violations, capture the operation type and target address
+				if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
+					accessType_ = ep->ExceptionRecord->ExceptionInformation[0];
+					accessAddress_ = ep->ExceptionRecord->ExceptionInformation[1];
+				}
+			}
+		}
+		
+		const char* what() const noexcept override {
+			return "Windows Structured Exception";
+		}
+		
+		unsigned int code() const { return code_; }
+		void* address() const { return address_; }
+		
+		std::string details() const {
+			std::string msg;
+			switch (code_) {
+				case EXCEPTION_ACCESS_VIOLATION:
+					msg = "Access Violation";
+					{
+						const char* op = accessType_ == 0 ? "read" : "write";
+						char buf[128];
+						snprintf(buf, sizeof(buf), " (%s at 0x%p)", op, (void*)accessAddress_);
+						msg += buf;
+					}
+					break;
+				case EXCEPTION_STACK_OVERFLOW: msg = "Stack Overflow"; break;
+				case EXCEPTION_INT_DIVIDE_BY_ZERO: msg = "Integer Divide by Zero"; break;
+				default: 
+					char buf[64];
+					snprintf(buf, sizeof(buf), "Code 0x%08X", code_);
+					msg = buf;
+					break;
+			}
+			return msg;
+		}
+		
+	private:
+		unsigned int code_;
+		void* address_;
+		ULONG_PTR accessType_;     // 0 = read, 1 = write, 8 = DEP violation
+		ULONG_PTR accessAddress_;  // Address that was accessed
+	};
+	
+	void SEHTranslator(unsigned int code, EXCEPTION_POINTERS* ep) {
+		// Stack overflow cannot be safely translated to a C++ exception because
+		// exception handling requires stack space for unwinding, which we don't have.
+		// Let it propagate as an SEH exception - the system will terminate the process.
+		if (code == EXCEPTION_STACK_OVERFLOW) {
+			// Don't throw - just return and let the SEH continue
+			// The process will likely terminate, but that's safer than undefined behavior
+			return;
+		}
+		throw SEHException(code, ep);
+	}
+}
 
 namespace PrismaUI::Core {
 	using namespace PrismaUI::Listeners;
@@ -27,6 +94,7 @@ namespace PrismaUI::Core {
 	ID3D11Device* d3dDevice = nullptr;
 	ID3D11DeviceContext* d3dContext = nullptr;
 	HWND hWnd = nullptr;
+	WNDPROC s_originalWndProc = nullptr;
 	RE::BSGraphics::ScreenSize screenSize;
 
 	std::unique_ptr<DirectX::SpriteBatch> spriteBatch;
@@ -106,7 +174,7 @@ namespace PrismaUI::Core {
 		if (!hWnd && runtimeData.renderWindows && runtimeData.renderWindows->hWnd) {
 			hWnd = reinterpret_cast<HWND>(runtimeData.renderWindows->hWnd);
 			screenSize = renderManager->GetScreenSize();
-			
+
 			static std::atomic<bool> input_handler_initialized = false;
 			bool expected_ih_init = false;
 
@@ -120,7 +188,7 @@ namespace PrismaUI::Core {
 					} else {
 						logger::error("Failed to install WndProc hook!");
 					}
-				});
+	});
 			}
 		}
 		else if (!hWnd) {
@@ -199,65 +267,180 @@ namespace PrismaUI::Core {
 		// Process pending operations for all views
 		ViewOperationQueue::ProcessAllViewOperations();
 
-		ultralightThread.submit([dev = d3dDevice, ctx = d3dContext, hwnd = hWnd]() {
-			if (!dev || !ctx || !hwnd || !renderer) return;
+		auto ultralightFuture = ultralightThread.submit([dev = d3dDevice, ctx = d3dContext, hwnd = hWnd]() {
+			// Enable SEH to C++ exception translation for this thread
+			_set_se_translator(SEHTranslator);
+			
+			try {
+				if (!dev || !ctx || !hwnd) {
+					logger::warn("UI Thread: D3D device/context/hwnd is null, skipping frame.");
+					return;
+				}
+				
+				// Capture renderer locally to avoid race with shutdown
+				auto localRenderer = renderer;
+				if (!localRenderer) {
+					logger::warn("UI Thread: Renderer is null, skipping frame.");
+					return;
+				}
 
-			std::vector<std::shared_ptr<PrismaView>> viewsToInitialize;
-			{
-				std::shared_lock lock(viewsMutex);
-				for (auto& pair : views) {
-					if (pair.second && !pair.second->ultralightView && !pair.second->htmlPathToLoad.empty()) {
-						viewsToInitialize.push_back(pair.second);
+				// Check for views that need recovery after an exception
+				std::vector<std::shared_ptr<PrismaView>> viewsToRecover;
+				{
+					std::shared_lock lock(viewsMutex);
+					for (auto& pair : views) {
+						if (pair.second && pair.second->needsRecovery.load() && pair.second->ultralightView) {
+							viewsToRecover.push_back(pair.second);
+						}
+					}
+				}
+
+				for (auto& viewData : viewsToRecover) {
+					int attempts = viewData->recoveryAttempts.fetch_add(1);
+					if (attempts >= 3) {
+						logger::error("UI Thread: View [{}] recovery failed after {} attempts, giving up", 
+							viewData->id, attempts);
+						viewData->needsRecovery = false;
+						continue;
+					}
+
+					// Use original URL for recovery (the entry point that sets up everything)
+					if (!viewData->originalUrl.empty()) {
+						logger::info("UI Thread: Recovering View [{}] (attempt {}) by reloading original URL: {}", 
+							viewData->id, attempts + 1, viewData->originalUrl);
+						try {
+							viewData->ultralightView->LoadURL(String(viewData->originalUrl.c_str()));
+							viewData->needsRecovery = false;
+							viewData->isLoadingFinished = false;
+							viewData->recoveryAttempts = 0;  // Reset on successful recovery start
+						}
+						catch (...) {
+							logger::error("UI Thread: Failed to initiate recovery for View [{}]", viewData->id);
+						}
+					} else {
+						logger::warn("UI Thread: View [{}] needs recovery but has no originalUrl", viewData->id);
+						viewData->needsRecovery = false;  // Clear flag to avoid infinite loop
+					}
+				}
+
+				std::vector<std::shared_ptr<PrismaView>> viewsToInitialize;
+				{
+					std::shared_lock lock(viewsMutex);
+					for (auto& pair : views) {
+						if (pair.second && !pair.second->ultralightView && !pair.second->htmlPathToLoad.empty()) {
+							viewsToInitialize.push_back(pair.second);
+						}
+					}
+				}
+
+				for (auto& viewData : viewsToInitialize) {
+					if (!viewData || viewData->ultralightView) continue;
+
+					logger::info("UI Thread: Creating View [{}] for path: {}", viewData->id, viewData->htmlPathToLoad);
+
+					if (screenSize.width == 0 || screenSize.height == 0) {
+						logger::error("UI Thread: Cannot create View [{}], screen size is zero.", viewData->id);
+						continue;
+					}
+
+					// Re-check renderer before creating view
+					if (!localRenderer) {
+						logger::warn("UI Thread: Renderer became null during view creation.");
+						break;
+					}
+
+					ViewConfig view_config;
+					view_config.is_accelerated = false;
+					view_config.is_transparent = true;
+					view_config.initial_focus = false;
+					view_config.enable_images = true;
+					view_config.enable_javascript = true;
+					view_config.enable_compositor = false;
+
+					viewData->ultralightView = localRenderer->CreateView(screenSize.width, screenSize.height, view_config, nullptr);
+
+					if (viewData->ultralightView) {
+						viewData->loadListener = std::make_unique<Listeners::MyLoadListener>(viewData->id);
+						viewData->viewListener = std::make_unique<Listeners::MyViewListener>(viewData->id);
+						viewData->ultralightView->set_load_listener(viewData->loadListener.get());
+						viewData->ultralightView->set_view_listener(viewData->viewListener.get());
+						viewData->ultralightView->LoadURL(String(viewData->htmlPathToLoad.c_str()));
+						viewData->ultralightView->Unfocus();
+						viewData->htmlPathToLoad.clear();
+						logger::info("UI Thread: View [{}] successfully created and loading URL.", viewData->id);
+					}
+					else {
+						logger::error("UI Thread: Failed to create Ultralight View for ID [{}].", viewData->id);
+						viewData->htmlPathToLoad = "[CREATION FAILED]";
+					}
+				}
+
+				ProcessEvents();
+
+				logger::trace("UI Thread: Calling renderer->Update()");
+				if (localRenderer) {
+					localRenderer->Update();
+					logger::trace("UI Thread: Calling renderer->RefreshDisplay()");
+					localRenderer->RefreshDisplay(0);
+					logger::trace("UI Thread: Calling renderer->Render()");
+					localRenderer->Render();
+				}
+
+				logger::trace("UI Thread: Calling RenderViews()");
+				RenderViews();
+				logger::trace("UI Thread: RenderViews() completed");
+			}
+			catch (const SEHException& seh) {
+				logger::critical("UI Thread: SEH Exception in render loop: {} at address 0x{:p}", 
+					seh.details(), seh.address());
+				// Mark all views for recovery - the renderer state is likely corrupted
+				{
+					std::shared_lock lock(viewsMutex);
+					for (auto& pair : views) {
+						if (pair.second) {
+							pair.second->needsRecovery = true;
+							logger::warn("View [{}] marked for recovery after SEH exception", pair.first);
+						}
 					}
 				}
 			}
-
-			for (auto& viewData : viewsToInitialize) {
-				if (viewData->ultralightView) continue;
-
-				logger::info("UI Thread: Creating View [{}] for path: {}", viewData->id, viewData->htmlPathToLoad);
-
-				if (screenSize.width == 0 || screenSize.height == 0) {
-					logger::error("UI Thread: Cannot create View [{}], screen size is zero.", viewData->id);
-					continue;
-				}
-
-				ViewConfig view_config;
-				view_config.is_accelerated = false;
-				view_config.is_transparent = true;
-				view_config.initial_focus = false;
-				view_config.enable_images = true;
-				view_config.enable_javascript = true;
-				view_config.enable_compositor = false;
-
-				viewData->ultralightView = renderer->CreateView(screenSize.width, screenSize.height, view_config, nullptr);
-
-				if (viewData->ultralightView) {
-					viewData->loadListener = std::make_unique<Listeners::MyLoadListener>(viewData->id);
-					viewData->viewListener = std::make_unique<Listeners::MyViewListener>(viewData->id);
-					viewData->ultralightView->set_load_listener(viewData->loadListener.get());
-					viewData->ultralightView->set_view_listener(viewData->viewListener.get());
-					viewData->ultralightView->LoadURL(String(viewData->htmlPathToLoad.c_str()));
-					viewData->ultralightView->Unfocus();
-					viewData->htmlPathToLoad.clear();
-					logger::info("UI Thread: View [{}] successfully created and loading URL.", viewData->id);
-				}
-				else {
-					logger::error("UI Thread: Failed to create Ultralight View for ID [{}].", viewData->id);
-					viewData->htmlPathToLoad = "[CREATION FAILED]";
+			catch (const std::exception& e) {
+				logger::critical("UI Thread: Exception in render loop: {}", e.what());
+				// Mark all views for recovery
+				{
+					std::shared_lock lock(viewsMutex);
+					for (auto& pair : views) {
+						if (pair.second) {
+							pair.second->needsRecovery = true;
+						}
+					}
 				}
 			}
-
-			ProcessEvents();
-
-			if (renderer) {
-				renderer->Update();
-				renderer->RefreshDisplay(0);
-				renderer->Render();
+			catch (...) {
+				// Unknown exceptions (likely from Ultralight/WebCore internals)
+				logger::critical("UI Thread: Unknown exception in render loop (likely Ultralight internal error)");
+				// Mark all views for recovery
+				{
+					std::shared_lock lock(viewsMutex);
+					for (auto& pair : views) {
+						if (pair.second) {
+							pair.second->needsRecovery = true;
+						}
+					}
+				}
 			}
-
-			RenderViews();
-			}).get();  // Wait for UI thread to complete before accessing view data
+			});
+		
+		// Wait for UI thread but handle any exceptions that might have escaped
+		try {
+			ultralightFuture.get();
+		}
+		catch (const std::exception& e) {
+			logger::error("D3DPresent: Exception from UI thread: {}", e.what());
+		}
+		catch (...) {
+			logger::error("D3DPresent: Unknown exception from UI thread");
+		}
 
 		std::vector<std::shared_ptr<PrismaView>> viewsToCheck;
 		{
@@ -302,8 +485,6 @@ namespace PrismaUI::Core {
 		spriteBatch.reset();
 		commonStates.reset();
 		logger::debug("DirectXTK resources released.");
-
-		InputHandler::Shutdown();
 
 		d3dDevice = nullptr;
 		d3dContext = nullptr;

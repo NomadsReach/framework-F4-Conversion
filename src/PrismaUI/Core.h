@@ -112,7 +112,6 @@ namespace PrismaUI::Core {
 	extern ID3D11Device* d3dDevice;
 	extern ID3D11DeviceContext* d3dContext;
 	extern HWND hWnd;
-	extern WNDPROC s_originalWndProc;
 	extern RE::BSGraphics::ScreenSize screenSize;
 	extern std::unique_ptr<DirectX::SpriteBatch> spriteBatch;
 	extern std::unique_ptr<DirectX::CommonStates> commonStates;

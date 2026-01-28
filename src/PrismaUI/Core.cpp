@@ -94,7 +94,7 @@ namespace PrismaUI::Core {
 	ID3D11Device* d3dDevice = nullptr;
 	ID3D11DeviceContext* d3dContext = nullptr;
 	HWND hWnd = nullptr;
-	WNDPROC s_originalWndProc = nullptr;
+
 	RE::BSGraphics::ScreenSize screenSize;
 
 	std::unique_ptr<DirectX::SpriteBatch> spriteBatch;
@@ -268,8 +268,12 @@ namespace PrismaUI::Core {
 		ViewOperationQueue::ProcessAllViewOperations();
 
 		auto ultralightFuture = ultralightThread.submit([dev = d3dDevice, ctx = d3dContext, hwnd = hWnd]() {
-			// Enable SEH to C++ exception translation for this thread
-			_set_se_translator(SEHTranslator);
+			// Enable SEH to C++ exception translation for this thread (only needs to be set once per thread)
+			static bool sehTranslatorSet = false;
+			if (!sehTranslatorSet) {
+				_set_se_translator(SEHTranslator);
+				sehTranslatorSet = true;
+			}
 			
 			try {
 				if (!dev || !ctx || !hwnd) {
@@ -312,7 +316,7 @@ namespace PrismaUI::Core {
 							viewData->ultralightView->LoadURL(String(viewData->originalUrl.c_str()));
 							viewData->needsRecovery = false;
 							viewData->isLoadingFinished = false;
-							viewData->recoveryAttempts = 0;  // Reset on successful recovery start
+							// recoveryAttempts will be reset by OnFinishLoading on successful load
 						}
 						catch (...) {
 							logger::error("UI Thread: Failed to initiate recovery for View [{}]", viewData->id);
@@ -377,18 +381,13 @@ namespace PrismaUI::Core {
 
 				ProcessEvents();
 
-				logger::trace("UI Thread: Calling renderer->Update()");
 				if (localRenderer) {
 					localRenderer->Update();
-					logger::trace("UI Thread: Calling renderer->RefreshDisplay()");
 					localRenderer->RefreshDisplay(0);
-					logger::trace("UI Thread: Calling renderer->Render()");
 					localRenderer->Render();
 				}
 
-				logger::trace("UI Thread: Calling RenderViews()");
 				RenderViews();
-				logger::trace("UI Thread: RenderViews() completed");
 			}
 			catch (const SEHException& seh) {
 				logger::critical("UI Thread: SEH Exception in render loop: {} at address 0x{:p}", 
@@ -485,6 +484,8 @@ namespace PrismaUI::Core {
 		spriteBatch.reset();
 		commonStates.reset();
 		logger::debug("DirectXTK resources released.");
+
+		InputHandler::Shutdown();
 
 		d3dDevice = nullptr;
 		d3dContext = nullptr;

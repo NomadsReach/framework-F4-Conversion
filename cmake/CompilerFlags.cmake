@@ -34,7 +34,7 @@ if(MSVC)
     #string(APPEND CMAKE_CXX_FLAGS " /Zc:threadSafeInit") # Enforce thread-safe initialization
     #string(APPEND CMAKE_CXX_FLAGS " /Zc:trigraphs") # Enforce trigraph rules
     #string(APPEND CMAKE_CXX_FLAGS " /Zc:wchar_t") # Enforce wchar_t rules
-    #string(APPEND CMAKE_CXX_FLAGS_RELEASE  " /GL") # Whole program optimization 
+    #string(APPEND CMAKE_CXX_FLAGS_RELEASE " /GL") # Whole program optimization 
     
     # Apply critical flags to all build configurations (Debug/Release, C/C++)
     # This ensures consistency and overrides CMake defaults that may vary by configuration

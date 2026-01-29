@@ -7,24 +7,24 @@
 #include <queue>
 
 namespace PrismaUI::Core {
-	typedef uint64_t PrismaViewId;
-	struct PrismaView;
+    typedef uint64_t PrismaViewId;
+    struct PrismaView;
 }
 
 namespace PrismaUI::ViewOperationQueue {
-	using OperationFunc = std::function<void()>;
-	
-	constexpr size_t MAX_OPERATIONS_PER_VIEW = 100;
+    using OperationFunc = std::function<void()>;
 
-	bool EnqueueOperation(Core::PrismaViewId viewId, OperationFunc operation);
-    
-	void ProcessNextOperation(Core::PrismaViewId viewId);
+    constexpr size_t MAX_OPERATIONS_PER_VIEW = 100;
 
-	void ProcessAllViewOperations();
+    bool EnqueueOperation(Core::PrismaViewId viewId, OperationFunc operation);
 
-	void ClearOperations(Core::PrismaViewId viewId);
+    void ProcessNextOperation(Core::PrismaViewId viewId);
 
-	size_t GetQueueSize(Core::PrismaViewId viewId);
+    void ProcessAllViewOperations();
 
-	bool IsProcessing(Core::PrismaViewId viewId);
+    void ClearOperations(Core::PrismaViewId viewId);
+
+    size_t GetQueueSize(Core::PrismaViewId viewId);
+
+    bool IsProcessing(Core::PrismaViewId viewId);
 }

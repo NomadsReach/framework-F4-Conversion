@@ -10,7 +10,8 @@ if(MSVC)
     # Code generation optimizations
     string(APPEND CMAKE_CXX_FLAGS " /Gy")    # Function-level linking (enables dead code elimination)
     string(APPEND CMAKE_CXX_FLAGS " /Gw")    # Optimize global data (similar to /Gy for globals)
-    string(APPEND CMAKE_CXX_FLAGS " /arch:AVX2")  # Use AVX2 SIMD instructions
+    #string(APPEND CMAKE_CXX_FLAGS " /arch:AVX")  # Use AVX (since 2011) SIMD instructions
+    #string(APPEND CMAKE_CXX_FLAGS " /arch:AVX2")  # Use AVX2 (since 2013) SIMD instructions
     
     # Strict C++ standard conformance flags
     string(APPEND CMAKE_CXX_FLAGS " /Zc:inline")
@@ -33,7 +34,7 @@ if(MSVC)
     #string(APPEND CMAKE_CXX_FLAGS " /Zc:threadSafeInit") # Enforce thread-safe initialization
     #string(APPEND CMAKE_CXX_FLAGS " /Zc:trigraphs") # Enforce trigraph rules
     #string(APPEND CMAKE_CXX_FLAGS " /Zc:wchar_t") # Enforce wchar_t rules
-    #string(APPEND CMAKE_CXX_FLAGS " /GL") # Whole program optimization
+    #string(APPEND CMAKE_CXX_FLAGS_RELEASE " /GL") # Whole program optimization 
     
     # Apply critical flags to all build configurations (Debug/Release, C/C++)
     # This ensures consistency and overrides CMake defaults that may vary by configuration
@@ -51,7 +52,9 @@ if(MSVC)
     
     # Add flags for PDB generation in Release builds
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /Zi")
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
+    #set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF /LTCG") # Enable if using /GL
+    #set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF /LTCG")
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF") # /GL and /LTCG disabled to see if helps with debugging
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
     
 

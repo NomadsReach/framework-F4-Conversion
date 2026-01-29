@@ -1,13 +1,14 @@
 ﻿#include "InputHandler.h"
-#include "Core.h"
-#include "ViewManager.h"
-#include "Utils/Encoding.h"
 
 #include <commctrl.h>
+
+#include "Core.h"
+#include "Utils/Encoding.h"
+#include "ViewManager.h"
 #pragma comment(lib, "comctl32.lib")
 
 namespace PrismaUI::InputHandler {
-	using namespace Core;
+    using namespace Core;
 
     HWND g_hWnd = nullptr;
     SingleThreadExecutor* g_ultralightThreadExecutor = nullptr;
@@ -24,33 +25,12 @@ namespace PrismaUI::InputHandler {
 
     const int SCROLL_LINES_PER_WHEEL_DELTA = 1;
 
-    bool g_mouseButtonStates[3] = { false, false, false };
+    bool g_mouseButtonStates[3] = {false, false, false};
 
     // WndProc subclass state
     static std::atomic<bool> g_wndProcInstalled = false;
-    static std::atomic<bool> g_commonControlsInit = false;
-    static constexpr UINT_PTR SUBCLASS_ID = 0x505249534D41; // "PRISMA" in hex
-    static std::mutex g_wndProcMutex;  // Thread-safe installation
-
-    bool EnsureCommonControlsInitialized()
-    {
-        if (g_commonControlsInit.load()) {
-            return true;
-        }
-
-        INITCOMMONCONTROLSEX icc = {};
-        icc.dwSize = sizeof(icc);
-        icc.dwICC = ICC_STANDARD_CLASSES;
-
-        if (InitCommonControlsEx(&icc)) {
-            g_commonControlsInit.store(true);
-            logger::debug("Common controls initialized");
-            return true;
-        }
-
-        logger::warn("Failed to initialize common controls: {}", GetLastError());
-        return false;
-    }
+    static constexpr UINT_PTR SUBCLASS_ID = 0x505249534D41;  // "PRISMA" in hex
+    static std::mutex g_wndProcMutex;                        // Thread-safe installation
 
     class MouseEventListener : public RE::BSTEventSink<RE::InputEvent*> {
     public:
@@ -59,7 +39,9 @@ namespace PrismaUI::InputHandler {
             return &singleton;
         }
 
-        RE::BSEventNotifyControl ProcessEvent(RE::InputEvent* const* a_event, [[maybe_unused]] RE::BSTEventSource<RE::InputEvent*>* a_eventSource) override {
+        RE::BSEventNotifyControl ProcessEvent(
+            RE::InputEvent* const* a_event,
+            [[maybe_unused]] RE::BSTEventSource<RE::InputEvent*>* a_eventSource) override {
             if (!a_event || !*a_event || !g_isAnyInputCaptureActive.load()) {
                 return RE::BSEventNotifyControl::kContinue;
             }
@@ -71,105 +53,108 @@ namespace PrismaUI::InputHandler {
 
             for (auto event = *a_event; event; event = event->next) {
                 switch (event->GetEventType()) {
-                case RE::INPUT_EVENT_TYPE::kMouseMove: {
-                    auto mouseMoveEvent = event->AsMouseMoveEvent();
-                    if (mouseMoveEvent) {
-                        ultralight::MouseEvent ev;
-                        ev.type = ultralight::MouseEvent::kType_MouseMoved;
-                        ev.x = static_cast<int>(cursor->cursorPosX);
-                        ev.y = static_cast<int>(cursor->cursorPosY);
-                        ev.button = ultralight::MouseEvent::kButton_None;
+                    case RE::INPUT_EVENT_TYPE::kMouseMove: {
+                        auto mouseMoveEvent = event->AsMouseMoveEvent();
+                        if (mouseMoveEvent) {
+                            ultralight::MouseEvent ev;
+                            ev.type = ultralight::MouseEvent::kType_MouseMoved;
+                            ev.x = static_cast<int>(cursor->cursorPosX);
+                            ev.y = static_cast<int>(cursor->cursorPosY);
+                            ev.button = ultralight::MouseEvent::kButton_None;
 
-                        std::lock_guard lock(g_eventQueueMutex);
-                        g_eventQueue.emplace_back(ev);
-                    }
-                    break;
-                }
-
-                case RE::INPUT_EVENT_TYPE::kButton: {
-                    auto buttonEvent = event->AsButtonEvent();
-                    if (!buttonEvent || buttonEvent->GetDevice() != RE::INPUT_DEVICE::kMouse)
+                            std::lock_guard lock(g_eventQueueMutex);
+                            g_eventQueue.emplace_back(ev);
+                        }
                         break;
-
-                    const auto idCode = buttonEvent->GetIDCode();
-                    bool isPressed = buttonEvent->IsPressed();
-                    bool isUp = buttonEvent->IsUp();
-
-                    if (idCode <= 2) {
-                        ultralight::MouseEvent::Button button = ultralight::MouseEvent::kButton_None;
-                        switch (idCode) {
-                        case 0: button = ultralight::MouseEvent::kButton_Left; break;
-                        case 1: button = ultralight::MouseEvent::kButton_Right; break;
-                        case 2: button = ultralight::MouseEvent::kButton_Middle; break;
-                        }
-
-                        if (isPressed && !g_mouseButtonStates[idCode]) {
-                            g_mouseButtonStates[idCode] = true;
-
-                            ultralight::MouseEvent ev;
-                            ev.type = ultralight::MouseEvent::kType_MouseDown;
-                            ev.x = static_cast<int>(cursor->cursorPosX);
-                            ev.y = static_cast<int>(cursor->cursorPosY);
-                            ev.button = button;
-
-                            std::lock_guard lock(g_eventQueueMutex);
-                            g_eventQueue.emplace_back(ev);
-                        }
-                        else if (isUp && g_mouseButtonStates[idCode]) {
-                            g_mouseButtonStates[idCode] = false;
-
-                            ultralight::MouseEvent ev;
-                            ev.type = ultralight::MouseEvent::kType_MouseUp;
-                            ev.x = static_cast<int>(cursor->cursorPosX);
-                            ev.y = static_cast<int>(cursor->cursorPosY);
-                            ev.button = button;
-
-                            std::lock_guard lock(g_eventQueueMutex);
-                            g_eventQueue.emplace_back(ev);
-                        }
                     }
 
-                    else if (idCode == 8 || idCode == 9) {
-                        if (isPressed) {
-                            ScrollEventWithPosition scrollWithPos;
-                            scrollWithPos.event.type = ultralight::ScrollEvent::kType_ScrollByPixel;
-                            scrollWithPos.event.delta_x = 0;
-                            scrollWithPos.mouseX = static_cast<int>(cursor->cursorPosX);
-                            scrollWithPos.mouseY = static_cast<int>(cursor->cursorPosY);
+                    case RE::INPUT_EVENT_TYPE::kButton: {
+                        auto buttonEvent = event->AsButtonEvent();
+                        if (!buttonEvent || buttonEvent->GetDevice() != RE::INPUT_DEVICE::kMouse) break;
 
-                    int scrollPixelSize = 28;
+                        const auto idCode = buttonEvent->GetIDCode();
+                        bool isPressed = buttonEvent->IsPressed();
+                        bool isUp = buttonEvent->IsUp();
 
-                            Core::PrismaViewId focusedViewId;
-                            {
-                                std::lock_guard lock(g_focusedViewIdMutex);
-                                focusedViewId = g_currentlyFocusedViewId;
+                        if (idCode <= 2) {
+                            ultralight::MouseEvent::Button button = ultralight::MouseEvent::kButton_None;
+                            switch (idCode) {
+                                case 0:
+                                    button = ultralight::MouseEvent::kButton_Left;
+                                    break;
+                                case 1:
+                                    button = ultralight::MouseEvent::kButton_Right;
+                                    break;
+                                case 2:
+                                    button = ultralight::MouseEvent::kButton_Middle;
+                                    break;
                             }
 
-                            if (focusedViewId != 0) {
-                                std::shared_lock lock(*g_viewsMapMutex);
-                                auto it = g_viewsMap->find(focusedViewId);
-                                if (it != g_viewsMap->end() && it->second) {
-                                    scrollPixelSize = it->second->scrollingPixelSize;
+                            if (isPressed && !g_mouseButtonStates[idCode]) {
+                                g_mouseButtonStates[idCode] = true;
+
+                                ultralight::MouseEvent ev;
+                                ev.type = ultralight::MouseEvent::kType_MouseDown;
+                                ev.x = static_cast<int>(cursor->cursorPosX);
+                                ev.y = static_cast<int>(cursor->cursorPosY);
+                                ev.button = button;
+
+                                std::lock_guard lock(g_eventQueueMutex);
+                                g_eventQueue.emplace_back(ev);
+                            } else if (isUp && g_mouseButtonStates[idCode]) {
+                                g_mouseButtonStates[idCode] = false;
+
+                                ultralight::MouseEvent ev;
+                                ev.type = ultralight::MouseEvent::kType_MouseUp;
+                                ev.x = static_cast<int>(cursor->cursorPosX);
+                                ev.y = static_cast<int>(cursor->cursorPosY);
+                                ev.button = button;
+
+                                std::lock_guard lock(g_eventQueueMutex);
+                                g_eventQueue.emplace_back(ev);
+                            }
+                        }
+
+                        else if (idCode == 8 || idCode == 9) {
+                            if (isPressed) {
+                                ScrollEventWithPosition scrollWithPos;
+                                scrollWithPos.event.type = ultralight::ScrollEvent::kType_ScrollByPixel;
+                                scrollWithPos.event.delta_x = 0;
+                                scrollWithPos.mouseX = static_cast<int>(cursor->cursorPosX);
+                                scrollWithPos.mouseY = static_cast<int>(cursor->cursorPosY);
+
+                                int scrollPixelSize = 28;
+
+                                Core::PrismaViewId focusedViewId;
+                                {
+                                    std::lock_guard lock(g_focusedViewIdMutex);
+                                    focusedViewId = g_currentlyFocusedViewId;
                                 }
-                            }
 
-                            int scrollAmount = SCROLL_LINES_PER_WHEEL_DELTA * scrollPixelSize;
-                            if (idCode == 9) {
-                                scrollWithPos.event.delta_y = -scrollAmount;
-                            }
-                            else {
-                                scrollWithPos.event.delta_y = scrollAmount;
-                            }
+                                if (focusedViewId != 0) {
+                                    std::shared_lock lock(*g_viewsMapMutex);
+                                    auto it = g_viewsMap->find(focusedViewId);
+                                    if (it != g_viewsMap->end() && it->second) {
+                                        scrollPixelSize = it->second->scrollingPixelSize;
+                                    }
+                                }
 
-                            std::lock_guard lock(g_eventQueueMutex);
-                            g_eventQueue.emplace_back(scrollWithPos);
+                                int scrollAmount = SCROLL_LINES_PER_WHEEL_DELTA * scrollPixelSize;
+                                if (idCode == 9) {
+                                    scrollWithPos.event.delta_y = -scrollAmount;
+                                } else {
+                                    scrollWithPos.event.delta_y = scrollAmount;
+                                }
+
+                                std::lock_guard lock(g_eventQueueMutex);
+                                g_eventQueue.emplace_back(scrollWithPos);
+                            }
                         }
+                        break;
                     }
-                    break;
-                }
 
-                default:
-                    break;
+                    default:
+                        break;
                 }
             }
 
@@ -177,7 +162,8 @@ namespace PrismaUI::InputHandler {
         }
     };
 
-    LRESULT CALLBACK SubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    LRESULT CALLBACK SubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass,
+                                  DWORD_PTR /*dwRefData*/) {
         if (g_isAnyInputCaptureActive.load()) {
             bool handledByUI = false;
             Core::PrismaViewId focusedViewIdCopy;
@@ -188,91 +174,75 @@ namespace PrismaUI::InputHandler {
 
             if (focusedViewIdCopy != 0) {
                 switch (uMsg) {
-                case WM_KEYDOWN: {
-                    ultralight::KeyEvent keyDownEvent = WinKeyHandler::CreateKeyEvent(
-                        ultralight::KeyEvent::kType_RawKeyDown,
-                        wParam,
-                        lParam
-                    );
-                    {
-                        std::lock_guard lock(g_eventQueueMutex);
-                        g_eventQueue.emplace_back(keyDownEvent);
-                    }
-                    handledByUI = true;
+                    case WM_KEYDOWN: {
+                        ultralight::KeyEvent keyDownEvent =
+                            WinKeyHandler::CreateKeyEvent(ultralight::KeyEvent::kType_RawKeyDown, wParam, lParam);
+                        {
+                            std::lock_guard lock(g_eventQueueMutex);
+                            g_eventQueue.emplace_back(keyDownEvent);
+                        }
+                        handledByUI = true;
 
-                    BYTE kbdState[256];
-                    GetKeyboardState(kbdState);
-                    HKL currentLayout = GetKeyboardLayout(GetWindowThreadProcessId(hwnd, NULL));
+                        BYTE kbdState[256];
+                        GetKeyboardState(kbdState);
+                        HKL currentLayout = GetKeyboardLayout(GetWindowThreadProcessId(hwnd, NULL));
 
-                    wchar_t translatedChars[5] = { 0 };
-                    int charCount = ToUnicodeEx(
-                        (UINT)wParam,
-                        ((lParam >> 16) & 0xFF),
-                        kbdState,
-                        translatedChars,
-                        4,
-                        0,
-                        currentLayout
-                    );
+                        wchar_t translatedChars[5] = {0};
+                        int charCount = ToUnicodeEx((UINT)wParam, ((lParam >> 16) & 0xFF), kbdState, translatedChars, 4,
+                                                    0, currentLayout);
 
-                    if (charCount > 0) {
-                        bool viewHasInputFieldFocus = ViewManager::ViewHasInputFocus(focusedViewIdCopy);
-                        if (viewHasInputFieldFocus) {
-                            for (int i = 0; i < charCount; ++i) {
-                                wchar_t ch = translatedChars[i];
-                                if (ch >= 0x20 || ch == '\t') {
-                                    ultralight::KeyEvent charEvent;
-                                    charEvent.type = ultralight::KeyEvent::kType_Char;
-                                    WinKeyHandler::GetUltralightModifiers(charEvent);
+                        if (charCount > 0) {
+                            bool viewHasInputFieldFocus = ViewManager::ViewHasInputFocus(focusedViewIdCopy);
+                            if (viewHasInputFieldFocus) {
+                                for (int i = 0; i < charCount; ++i) {
+                                    wchar_t ch = translatedChars[i];
+                                    if (ch >= 0x20 || ch == '\t') {
+                                        ultralight::KeyEvent charEvent;
+                                        charEvent.type = ultralight::KeyEvent::kType_Char;
+                                        WinKeyHandler::GetUltralightModifiers(charEvent);
 
-                                    wchar_t single_char_str[2] = { ch, 0 };
-                                    char utf8_buffer[8] = { 0 };
-                                    int utf8_len = WideCharToMultiByte(
-                                        CP_UTF8, 0, single_char_str, -1,
-                                        utf8_buffer, sizeof(utf8_buffer),
-                                        nullptr, nullptr
-                                    );
-                                    std::string narrow_string = (utf8_len > 0) ?
-                                        std::string(utf8_buffer) : std::string();
-                                    ultralight::String ul_text = ultralight::Convert(narrow_string);
+                                        wchar_t single_char_str[2] = {ch, 0};
+                                        char utf8_buffer[8] = {0};
+                                        int utf8_len = WideCharToMultiByte(CP_UTF8, 0, single_char_str, -1, utf8_buffer,
+                                                                           sizeof(utf8_buffer), nullptr, nullptr);
+                                        std::string narrow_string =
+                                            (utf8_len > 0) ? std::string(utf8_buffer) : std::string();
+                                        ultralight::String ul_text = ultralight::Convert(narrow_string);
 
-                                    charEvent.text = ul_text;
-                                    charEvent.unmodified_text = ul_text;
-                                    charEvent.virtual_key_code = ultralight::KeyCodes::GK_UNKNOWN;
-                                    charEvent.key_identifier = "";
-                                    charEvent.is_auto_repeat = (HIWORD(lParam) & KF_REPEAT) == KF_REPEAT;
-                                    {
-                                        std::lock_guard lock(g_eventQueueMutex);
-                                        g_eventQueue.emplace_back(charEvent);
+                                        charEvent.text = ul_text;
+                                        charEvent.unmodified_text = ul_text;
+                                        charEvent.virtual_key_code = ultralight::KeyCodes::GK_UNKNOWN;
+                                        charEvent.key_identifier = "";
+                                        charEvent.is_auto_repeat = (HIWORD(lParam) & KF_REPEAT) == KF_REPEAT;
+                                        {
+                                            std::lock_guard lock(g_eventQueueMutex);
+                                            g_eventQueue.emplace_back(charEvent);
+                                        }
                                     }
                                 }
                             }
                         }
+                        break;
                     }
-                    break;
-                }
-                case WM_KEYUP: {
-                    ultralight::KeyEvent ev = WinKeyHandler::CreateKeyEvent(
-                        ultralight::KeyEvent::kType_KeyUp,
-                        wParam,
-                        lParam
-                    );
-                    {
-                        std::lock_guard lock(g_eventQueueMutex);
-                        g_eventQueue.emplace_back(ev);
-                    }
-                    handledByUI = true;
-                    break;
-                }
-                case WM_CHAR: {
-                    bool viewHasInputFieldFocus = ViewManager::ViewHasInputFocus(focusedViewIdCopy);
-                    if (viewHasInputFieldFocus) {
+                    case WM_KEYUP: {
+                        ultralight::KeyEvent ev =
+                            WinKeyHandler::CreateKeyEvent(ultralight::KeyEvent::kType_KeyUp, wParam, lParam);
+                        {
+                            std::lock_guard lock(g_eventQueueMutex);
+                            g_eventQueue.emplace_back(ev);
+                        }
                         handledByUI = true;
+                        break;
                     }
-                    break;
-                }
-                default:
-                    break;
+                    case WM_CHAR: {
+                        bool viewHasInputFieldFocus = ViewManager::ViewHasInputFocus(focusedViewIdCopy);
+                        if (viewHasInputFieldFocus) {
+                            handledByUI = true;
+                        }
+                        break;
+                    }
+                    default:
+                        break;
                 }
             }
 
@@ -294,7 +264,9 @@ namespace PrismaUI::InputHandler {
         return DefSubclassProc(hwnd, uMsg, wParam, lParam);
     }
 
-    void Initialize(HWND gameHwnd, SingleThreadExecutor* coreExecutor, std::map<Core::PrismaViewId, std::shared_ptr<Core::PrismaView>>* viewsMap, std::shared_mutex* viewsMapMutex) {
+    void Initialize(HWND gameHwnd, SingleThreadExecutor* coreExecutor,
+                    std::map<Core::PrismaViewId, std::shared_ptr<Core::PrismaView>>* viewsMap,
+                    std::shared_mutex* viewsMapMutex) {
         g_hWnd = gameHwnd;
         g_ultralightThreadExecutor = coreExecutor;
         g_viewsMap = viewsMap;
@@ -309,15 +281,11 @@ namespace PrismaUI::InputHandler {
 
         logger::info("PrismaUI::InputHandler Initialized with HWND: {}", (void*)g_hWnd);
 
-        // Initialize Common Controls early (required for SetWindowSubclass)
-        EnsureCommonControlsInitialized();
-
         auto inputEventSource = RE::BSInputDeviceManager::GetSingleton();
         if (inputEventSource) {
             inputEventSource->AddEventSink(MouseEventListener::GetSingleton());
             logger::info("MouseEventListener registered with BSInputDeviceManager");
-        }
-        else {
+        } else {
             logger::error("Failed to register MouseEventListener: BSInputDeviceManager is null");
         }
     }
@@ -339,11 +307,6 @@ namespace PrismaUI::InputHandler {
         if (!IsWindow(g_hWnd)) {
             logger::error("HWND {:p} is not a valid window", (void*)g_hWnd);
             return false;
-        }
-
-        // Initialize Common Controls (required for SetWindowSubclass)
-        if (!EnsureCommonControlsInitialized()) {
-            logger::warn("Common controls initialization failed, trying subclass anyway...");
         }
 
         logger::debug("Attempting to install subclass on HWND: {:p}", (void*)g_hWnd);
@@ -413,7 +376,8 @@ namespace PrismaUI::InputHandler {
 
         if (disableSystem) {
             if (g_isAnyInputCaptureActive.exchange(false)) {
-                logger::debug("PrismaUI Input Capture System Disabled (was active for View [{}]).", currentFocusedBeforeDisable);
+                logger::debug("PrismaUI Input Capture System Disabled (was active for View [{}]).",
+                              currentFocusedBeforeDisable);
 
                 g_mouseButtonStates[0] = g_mouseButtonStates[1] = g_mouseButtonStates[2] = false;
 
@@ -438,18 +402,18 @@ namespace PrismaUI::InputHandler {
 
                             targetViewData->ultralightView->FireMouseEvent(resetEvent);
                         }
-                        });
+                    });
                 }
             }
-        }
-        else if (viewIdToUnfocus != 0) {
-            logger::debug("PrismaUI: DisableInputCapture called for View [{}] but View [{}] is/was focused. No change to system state, only unfocused ID removed if it matched.", viewIdToUnfocus, currentFocusedBeforeDisable);
+        } else if (viewIdToUnfocus != 0) {
+            logger::debug(
+                "PrismaUI: DisableInputCapture called for View [{}] but View [{}] is/was focused. No change to system "
+                "state, only unfocused ID removed if it matched.",
+                viewIdToUnfocus, currentFocusedBeforeDisable);
         }
     }
 
-    bool IsAnyInputCaptureActive() {
-        return g_isAnyInputCaptureActive.load();
-    }
+    bool IsAnyInputCaptureActive() { return g_isAnyInputCaptureActive.load(); }
 
     bool IsInputCaptureActiveForView(const Core::PrismaViewId& viewId) {
         Core::PrismaViewId currentFocused;
@@ -496,74 +460,77 @@ namespace PrismaUI::InputHandler {
 
             if (targetViewData && targetViewData->ultralightView) {
                 ultralight::View* ulView = targetViewData->ultralightView.get();
-                ultralight::View* inspectorView = targetViewData->inspectorView ? targetViewData->inspectorView.get() : nullptr;
-                
+                ultralight::View* inspectorView =
+                    targetViewData->inspectorView ? targetViewData->inspectorView.get() : nullptr;
+
                 for (const auto& event_variant : ev_queue) {
-                    std::visit([ulView, inspectorView, &targetViewData](const auto& arg) {
-                        using T = std::decay_t<decltype(arg)>;
-                        if constexpr (std::is_same_v<T, ultralight::MouseEvent>) {
-                            // Check if mouse is over inspector bounds when inspector is visible
-                            bool mouseOverInspector = false;
-                            if (inspectorView && targetViewData->inspectorVisible.load()) {
-                                const float inspX = targetViewData->inspectorPosX;
-                                const float inspY = targetViewData->inspectorPosY;
-                                const float inspW = static_cast<float>(targetViewData->inspectorDisplayWidth);
-                                const float inspH = static_cast<float>(targetViewData->inspectorDisplayHeight);
-                                
-                                const float mouseX = static_cast<float>(arg.x);
-                                const float mouseY = static_cast<float>(arg.y);
-                                
-                                if (mouseX >= inspX && mouseX < (inspX + inspW) &&
-                                    mouseY >= inspY && mouseY < (inspY + inspH)) {
-                                    mouseOverInspector = true;
-                                    targetViewData->inspectorPointerHover.store(true);
+                    std::visit(
+                        [ulView, inspectorView, &targetViewData](const auto& arg) {
+                            using T = std::decay_t<decltype(arg)>;
+                            if constexpr (std::is_same_v<T, ultralight::MouseEvent>) {
+                                // Check if mouse is over inspector bounds when inspector is visible
+                                bool mouseOverInspector = false;
+                                if (inspectorView && targetViewData->inspectorVisible.load()) {
+                                    const float inspX = targetViewData->inspectorPosX;
+                                    const float inspY = targetViewData->inspectorPosY;
+                                    const float inspW = static_cast<float>(targetViewData->inspectorDisplayWidth);
+                                    const float inspH = static_cast<float>(targetViewData->inspectorDisplayHeight);
+
+                                    const float mouseX = static_cast<float>(arg.x);
+                                    const float mouseY = static_cast<float>(arg.y);
+
+                                    if (mouseX >= inspX && mouseX < (inspX + inspW) && mouseY >= inspY &&
+                                        mouseY < (inspY + inspH)) {
+                                        mouseOverInspector = true;
+                                        targetViewData->inspectorPointerHover.store(true);
+                                    } else {
+                                        targetViewData->inspectorPointerHover.store(false);
+                                    }
+                                }
+
+                                if (mouseOverInspector) {
+                                    // Translate mouse coordinates to inspector view
+                                    ultralight::MouseEvent inspectorEvent = arg;
+                                    inspectorEvent.x = arg.x - static_cast<int>(targetViewData->inspectorPosX);
+                                    inspectorEvent.y = arg.y - static_cast<int>(targetViewData->inspectorPosY);
+                                    inspectorView->FireMouseEvent(inspectorEvent);
                                 } else {
-                                    targetViewData->inspectorPointerHover.store(false);
+                                    ulView->FireMouseEvent(arg);
+                                }
+                            } else if constexpr (std::is_same_v<T, ScrollEventWithPosition>) {
+                                // Route scroll events to inspector if mouse is over it
+                                // Use captured mouse position for accurate bounds checking
+                                bool scrollOverInspector = false;
+                                if (inspectorView && targetViewData->inspectorVisible.load()) {
+                                    const float inspX = targetViewData->inspectorPosX;
+                                    const float inspY = targetViewData->inspectorPosY;
+                                    const float inspW = static_cast<float>(targetViewData->inspectorDisplayWidth);
+                                    const float inspH = static_cast<float>(targetViewData->inspectorDisplayHeight);
+
+                                    const float mouseX = static_cast<float>(arg.mouseX);
+                                    const float mouseY = static_cast<float>(arg.mouseY);
+
+                                    if (mouseX >= inspX && mouseX < (inspX + inspW) && mouseY >= inspY &&
+                                        mouseY < (inspY + inspH)) {
+                                        scrollOverInspector = true;
+                                    }
+                                }
+                                if (scrollOverInspector) {
+                                    inspectorView->FireScrollEvent(arg.event);
+                                } else {
+                                    ulView->FireScrollEvent(arg.event);
+                                }
+                            } else if constexpr (std::is_same_v<T, ultralight::KeyEvent>) {
+                                // Route keyboard events to inspector if it's visible and focused
+                                if (inspectorView && targetViewData->inspectorVisible.load() &&
+                                    inspectorView->HasFocus()) {
+                                    inspectorView->FireKeyEvent(arg);
+                                } else {
+                                    ulView->FireKeyEvent(arg);
                                 }
                             }
-                            
-                            if (mouseOverInspector) {
-                                // Translate mouse coordinates to inspector view
-                                ultralight::MouseEvent inspectorEvent = arg;
-                                inspectorEvent.x = arg.x - static_cast<int>(targetViewData->inspectorPosX);
-                                inspectorEvent.y = arg.y - static_cast<int>(targetViewData->inspectorPosY);
-                                inspectorView->FireMouseEvent(inspectorEvent);
-                            } else {
-                                ulView->FireMouseEvent(arg);
-                            }
-                        } else if constexpr (std::is_same_v<T, ScrollEventWithPosition>) {
-                            // Route scroll events to inspector if mouse is over it
-                            // Use captured mouse position for accurate bounds checking
-                            bool scrollOverInspector = false;
-                            if (inspectorView && targetViewData->inspectorVisible.load()) {
-                                const float inspX = targetViewData->inspectorPosX;
-                                const float inspY = targetViewData->inspectorPosY;
-                                const float inspW = static_cast<float>(targetViewData->inspectorDisplayWidth);
-                                const float inspH = static_cast<float>(targetViewData->inspectorDisplayHeight);
-                                
-                                const float mouseX = static_cast<float>(arg.mouseX);
-                                const float mouseY = static_cast<float>(arg.mouseY);
-                                
-                                if (mouseX >= inspX && mouseX < (inspX + inspW) &&
-                                    mouseY >= inspY && mouseY < (inspY + inspH)) {
-                                    scrollOverInspector = true;
-                                }
-                            }
-                            if (scrollOverInspector) {
-                                inspectorView->FireScrollEvent(arg.event);
-                            } else {
-                                ulView->FireScrollEvent(arg.event);
-                            }
-                        } else if constexpr (std::is_same_v<T, ultralight::KeyEvent>) {
-                            // Route keyboard events to inspector if it's visible and focused
-                            if (inspectorView && targetViewData->inspectorVisible.load() && 
-                                inspectorView->HasFocus()) {
-                                inspectorView->FireKeyEvent(arg);
-                            } else {
-                                ulView->FireKeyEvent(arg);
-                            }
-                        }
-                    }, event_variant);
+                        },
+                        event_variant);
                 }
             }
         });
@@ -571,7 +538,10 @@ namespace PrismaUI::InputHandler {
 
     void Shutdown() {
         DisableInputCapture(0);
-        { std::lock_guard lock(g_eventQueueMutex); g_eventQueue.clear(); }
+        {
+            std::lock_guard lock(g_eventQueueMutex);
+            g_eventQueue.clear();
+        }
 
         auto inputEventSource = RE::BSInputDeviceManager::GetSingleton();
         if (inputEventSource) {

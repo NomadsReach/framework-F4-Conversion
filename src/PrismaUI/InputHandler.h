@@ -15,38 +15,36 @@
 class SingleThreadExecutor;
 
 namespace PrismaUI::Core {
-	typedef uint64_t PrismaViewId;
-	struct PrismaView;
+    typedef uint64_t PrismaViewId;
+    struct PrismaView;
 }
 
 namespace PrismaUI::InputHandler {
-	using namespace ultralight;
+    using namespace ultralight;
 
-	// Wrapper for scroll events that includes mouse position for proper routing
-	struct ScrollEventWithPosition {
-		ScrollEvent event;
-		int mouseX;
-		int mouseY;
-	};
+    // Wrapper for scroll events that includes mouse position for proper routing
+    struct ScrollEventWithPosition {
+        ScrollEvent event;
+        int mouseX;
+        int mouseY;
+    };
 
-	using InputEvent = std::variant<
-		MouseEvent,
-		ScrollEventWithPosition,
-		KeyEvent
-	>;
+    using InputEvent = std::variant<MouseEvent, ScrollEventWithPosition, KeyEvent>;
 
-	void Initialize(HWND gameHwnd, SingleThreadExecutor* coreExecutor, std::map<Core::PrismaViewId, std::shared_ptr<Core::PrismaView>>* viewsMap, std::shared_mutex* viewsMapMutex);
+    void Initialize(HWND gameHwnd, SingleThreadExecutor* coreExecutor,
+                    std::map<Core::PrismaViewId, std::shared_ptr<Core::PrismaView>>* viewsMap,
+                    std::shared_mutex* viewsMapMutex);
 
-	void EnableInputCapture(const Core::PrismaViewId& viewId);
-	void DisableInputCapture(const Core::PrismaViewId& viewId);
+    void EnableInputCapture(const Core::PrismaViewId& viewId);
+    void DisableInputCapture(const Core::PrismaViewId& viewId);
 
-	bool IsInputCaptureActiveForView(const Core::PrismaViewId& viewId);
+    bool IsInputCaptureActiveForView(const Core::PrismaViewId& viewId);
 
-	bool IsAnyInputCaptureActive();
+    bool IsAnyInputCaptureActive();
 
-	bool InstallWndProcHook();
-	void UninstallWndProcHook();
+    bool InstallWndProcHook();
+    void UninstallWndProcHook();
 
-	void ProcessEvents();
-	void Shutdown();
+    void ProcessEvents();
+    void Shutdown();
 }

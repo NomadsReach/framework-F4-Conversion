@@ -19,8 +19,13 @@ namespace PrismaUI::ViewRenderer {
 			std::shared_lock lock(viewsMutex);
 			viewsToRender.reserve(views.size());
 			for (const auto& pair : views) {
-				if (pair.second && !pair.second->isHidden) {
-					viewsToRender.push_back(pair.second);
+				const auto& viewPtr = pair.second;
+				if (!viewPtr) {
+					logger::warn("RenderViews: Found null shared_ptr in views map for ID [{}]", pair.first);
+					continue;
+				}
+				if (!viewPtr->isHidden.load()) {
+					viewsToRender.push_back(viewPtr);
 				}
 			}
 		}

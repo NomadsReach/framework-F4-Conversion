@@ -49,6 +49,8 @@ namespace PrismaUI::Core {
 		RefPtr<View> ultralightView = nullptr;
 		RefPtr<View> inspectorView = nullptr;
 		std::string htmlPathToLoad;
+		std::string originalUrl;       // Original URL from view creation (for recovery)
+		std::string lastLoadedUrl;     // Track last successfully loaded URL
 		std::atomic<bool> isHidden = false;
 		std::unique_ptr<Listeners::MyLoadListener> loadListener;
 		std::unique_ptr<Listeners::MyViewListener> viewListener;
@@ -58,6 +60,8 @@ namespace PrismaUI::Core {
 		std::atomic<bool> isPaused = false;
 		int order = 0;
 		std::atomic<bool> inspectorVisible = false;
+		std::atomic<bool> needsRecovery = false;  // Flag for recovery after exception
+		std::atomic<int> recoveryAttempts = 0;    // Track recovery attempts to prevent loops
 
 		// Inspector rendering data
 		std::vector<std::byte> inspectorPixelBuffer;

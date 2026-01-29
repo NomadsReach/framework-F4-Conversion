@@ -22,7 +22,9 @@ SKSEPlugin_Load(const SKSE::LoadInterface *a_skse) {
 
   logger::info("---------------- {} {} by {} ----------------", SKSE::GetPluginName(), SKSE::GetPluginVersion(), SKSE::GetPluginAuthor());
   logger::info("-------------------- Docs and Guides: https://prismaui.dev -------------------");
-  
+  logger::info("------------------- built using CommonLibSSE-NG v{} -------------------", COMMONLIBSSE_VERSION);
+  logger::info("------------------- Running on Skyrim v{} -------------------", REL::Module::get().version().string());
+
   // Load Ultralight DLLs from Data/PrismaUI/libs before any Ultralight API usage
   if (!PrismaUI::Utils::DllLoader::GetSingleton().LoadUltralightLibraries()) {
     logger::critical("Failed to load Ultralight libraries! Plugin will not load.");

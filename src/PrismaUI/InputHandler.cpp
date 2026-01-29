@@ -28,29 +28,8 @@ namespace PrismaUI::InputHandler {
 
     // WndProc subclass state
     static std::atomic<bool> g_wndProcInstalled = false;
-    static std::atomic<bool> g_commonControlsInit = false;
     static constexpr UINT_PTR SUBCLASS_ID = 0x505249534D41; // "PRISMA" in hex
     static std::mutex g_wndProcMutex;  // Thread-safe installation
-
-    bool EnsureCommonControlsInitialized()
-    {
-        if (g_commonControlsInit.load()) {
-            return true;
-        }
-
-        INITCOMMONCONTROLSEX icc = {};
-        icc.dwSize = sizeof(icc);
-        icc.dwICC = ICC_STANDARD_CLASSES;
-
-        if (InitCommonControlsEx(&icc)) {
-            g_commonControlsInit.store(true);
-            logger::debug("Common controls initialized");
-            return true;
-        }
-
-        logger::warn("Failed to initialize common controls: {}", GetLastError());
-        return false;
-    }
 
     class MouseEventListener : public RE::BSTEventSink<RE::InputEvent*> {
     public:
@@ -177,7 +156,7 @@ namespace PrismaUI::InputHandler {
         }
     };
 
-    LRESULT CALLBACK SubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    LRESULT CALLBACK SubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR /*dwRefData*/) {
         if (g_isAnyInputCaptureActive.load()) {
             bool handledByUI = false;
             Core::PrismaViewId focusedViewIdCopy;
@@ -309,9 +288,6 @@ namespace PrismaUI::InputHandler {
 
         logger::info("PrismaUI::InputHandler Initialized with HWND: {}", (void*)g_hWnd);
 
-        // Initialize Common Controls early (required for SetWindowSubclass)
-        EnsureCommonControlsInitialized();
-
         auto inputEventSource = RE::BSInputDeviceManager::GetSingleton();
         if (inputEventSource) {
             inputEventSource->AddEventSink(MouseEventListener::GetSingleton());
@@ -339,11 +315,6 @@ namespace PrismaUI::InputHandler {
         if (!IsWindow(g_hWnd)) {
             logger::error("HWND {:p} is not a valid window", (void*)g_hWnd);
             return false;
-        }
-
-        // Initialize Common Controls (required for SetWindowSubclass)
-        if (!EnsureCommonControlsInitialized()) {
-            logger::warn("Common controls initialization failed, trying subclass anyway...");
         }
 
         logger::debug("Attempting to install subclass on HWND: {:p}", (void*)g_hWnd);

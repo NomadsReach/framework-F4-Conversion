@@ -15,13 +15,6 @@ namespace PrismaUI::Listeners {
     void MyLoadListener::OnBeginLoading(View* /*caller*/, uint64_t /*frame_id*/, bool /*is_main_frame*/,
                                         const String& url) {
         logger::info("View [{}]: LoadListener: Begin loading URL: {}", viewId_, url.utf8().data());
-        ultralightThread.submit([id = viewId_] {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(id);
-            if (it != views.end()) {
-                it->second->isLoadingFinished = false;
-            }
-        });
     }
 
     void MyLoadListener::OnFinishLoading(View* /*caller*/, uint64_t /*frame_id*/, bool /*is_main_frame*/,
@@ -32,8 +25,8 @@ namespace PrismaUI::Listeners {
             auto it = views.find(id);
             if (it != views.end()) {
                 it->second->isLoadingFinished = true;
-                it->second->lastLoadedUrl = urlStr;  // Track for recovery
-                it->second->recoveryAttempts = 0;    // Reset recovery counter on successful load
+                it->second->lastLoadedUrl = urlStr;
+                it->second->recoveryAttempts = 0;
                 Communication::BindJSCallbacks(id);
             }
         });
@@ -76,7 +69,7 @@ namespace PrismaUI::Listeners {
     MyViewListener::~MyViewListener() = default;
 
     void MyViewListener::OnAddConsoleMessage(View* /*caller*/, const ConsoleMessage& message) {
-        logger::info("View [{}]: JSConsole: {}", viewId_, message.message().utf8().data());
+        // logger::info("View [{}]: JSConsole: {}", viewId_, message.message().utf8().data());
     }
 
     RefPtr<View> MyViewListener::OnCreateInspectorView(View* /*caller*/, bool is_local, const String& inspectedURL) {

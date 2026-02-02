@@ -28,7 +28,7 @@ namespace PrismaUI::InputHandler {
 
     // Clipboard safety limits
     constexpr size_t MAX_CLIPBOARD_SIZE = 1024 * 1024;  // 1MB max
-    constexpr size_t MAX_CLIPBOARD_CHARS = 100000;      // 100K characters max
+    constexpr size_t MAX_CLIPBOARD_CHARS = 200000;      // 200K characters max
 
     bool g_mouseButtonStates[3] = {false, false, false};
 

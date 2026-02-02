@@ -2,6 +2,7 @@
 
 #include <commctrl.h>
 
+#include "Communication.h"
 #include "Core.h"
 #include "Utils/Encoding.h"
 #include "ViewManager.h"
@@ -25,12 +26,205 @@ namespace PrismaUI::InputHandler {
 
     const int SCROLL_LINES_PER_WHEEL_DELTA = 1;
 
+    // Clipboard safety limits
+    constexpr size_t MAX_CLIPBOARD_SIZE = 1024 * 1024;  // 1MB max
+    constexpr size_t MAX_CLIPBOARD_CHARS = 100000;      // 100K characters max
+
     bool g_mouseButtonStates[3] = {false, false, false};
 
     // WndProc subclass state
     static std::atomic<bool> g_wndProcInstalled = false;
     static constexpr UINT_PTR SUBCLASS_ID = 0x505249534D41;  // "PRISMA" in hex
     static std::mutex g_wndProcMutex;                        // Thread-safe installation
+
+    // Clipboard helper functions
+    std::string EscapeForJS(const std::string& text) {
+        std::string escaped;
+
+        try {
+            escaped.reserve(text.size() * 2);  // Reserve extra space for escape sequences
+        } catch (const std::exception& e) {
+            logger::error("Failed to allocate memory for escaped text: {}", e.what());
+            return "";
+        }
+
+        for (size_t i = 0; i < text.size(); ++i) {
+            unsigned char c = static_cast<unsigned char>(text[i]);
+
+            // Handle multi-byte UTF-8 sequences
+            if (c >= 0x80) {
+                // Check for Unicode line/paragraph separators (U+2028, U+2029)
+                // U+2028 = E2 80 A8, U+2029 = E2 80 A9
+                if (i + 2 < text.size() && c == 0xE2 && static_cast<unsigned char>(text[i + 1]) == 0x80 &&
+                    (static_cast<unsigned char>(text[i + 2]) == 0xA8 ||
+                     static_cast<unsigned char>(text[i + 2]) == 0xA9)) {
+                    escaped += "\\u202";
+                    escaped += (text[i + 2] == 0xA8) ? '8' : '9';
+                    i += 2;
+                    continue;
+                }
+                // Pass through other UTF-8 sequences
+                escaped += c;
+                continue;
+            }
+
+            // Handle special characters and control codes
+            switch (c) {
+                case '\'':
+                    escaped += "\\'";
+                    break;
+                case '\"':
+                    escaped += "\\\"";
+                    break;
+                case '\\':
+                    escaped += "\\\\";
+                    break;
+                case '\n':
+                    escaped += "\\n";
+                    break;
+                case '\r':
+                    escaped += "\\r";
+                    break;
+                case '\t':
+                    escaped += "\\t";
+                    break;
+                case '\b':
+                    escaped += "\\b";
+                    break;
+                case '\f':
+                    escaped += "\\f";
+                    break;
+                default:
+                    // Filter out dangerous control characters (0x00-0x1F except handled above)
+                    if (c < 0x20) {
+                        // Skip null bytes and other control characters
+                        logger::trace("Filtered control character: 0x{:02X}", static_cast<int>(c));
+                    } else {
+                        escaped += c;
+                    }
+                    break;
+            }
+        }
+        return escaped;
+    }
+
+    std::string GetClipboardText() {
+        if (!OpenClipboard(g_hWnd)) {
+            logger::warn("Failed to open clipboard for reading");
+            return "";
+        }
+
+        HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+        if (!hData) {
+            CloseClipboard();
+            return "";
+        }
+
+        wchar_t* pszText = static_cast<wchar_t*>(GlobalLock(hData));
+        if (!pszText) {
+            CloseClipboard();
+            return "";
+        }
+
+        // Check size before converting
+        SIZE_T dataSize = GlobalSize(hData);
+        if (dataSize > MAX_CLIPBOARD_SIZE) {
+            logger::warn("Clipboard text too large: {} bytes (max: {} bytes). Truncating.", dataSize,
+                         MAX_CLIPBOARD_SIZE);
+            GlobalUnlock(hData);
+            CloseClipboard();
+            return "";
+        }
+
+        // Convert wide string to UTF-8
+        int utf8Length = WideCharToMultiByte(CP_UTF8, 0, pszText, -1, nullptr, 0, nullptr, nullptr);
+        if (utf8Length <= 0) {
+            GlobalUnlock(hData);
+            CloseClipboard();
+            return "";
+        }
+
+        // Check character count limit
+        size_t charCount = wcslen(pszText);
+        if (charCount > MAX_CLIPBOARD_CHARS) {
+            logger::warn("Clipboard text too long: {} characters (max: {} characters). Truncating.", charCount,
+                         MAX_CLIPBOARD_CHARS);
+            GlobalUnlock(hData);
+            CloseClipboard();
+            return "";
+        }
+
+        std::string result;
+        try {
+            result.resize(utf8Length - 1);
+            WideCharToMultiByte(CP_UTF8, 0, pszText, -1, &result[0], utf8Length, nullptr, nullptr);
+        } catch (const std::exception& e) {
+            logger::error("Failed to allocate memory for clipboard text: {}", e.what());
+            GlobalUnlock(hData);
+            CloseClipboard();
+            return "";
+        }
+
+        GlobalUnlock(hData);
+        CloseClipboard();
+
+        return result;
+    }
+
+    void SetClipboardText(const std::string& text) {
+        // Check size limits before processing
+        if (text.size() > MAX_CLIPBOARD_SIZE) {
+            logger::warn("Text too large to copy to clipboard: {} bytes (max: {} bytes)", text.size(),
+                         MAX_CLIPBOARD_SIZE);
+            return;
+        }
+
+        if (!OpenClipboard(g_hWnd)) {
+            logger::warn("Failed to open clipboard for writing");
+            return;
+        }
+
+        EmptyClipboard();
+
+        // Convert UTF-8 to wide string
+        int wideLength = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+        if (wideLength <= 0) {
+            CloseClipboard();
+            return;
+        }
+
+        HGLOBAL hMem = nullptr;
+        try {
+            hMem = GlobalAlloc(GMEM_MOVEABLE, wideLength * sizeof(wchar_t));
+            if (!hMem) {
+                logger::error("Failed to allocate global memory for clipboard");
+                CloseClipboard();
+                return;
+            }
+
+            wchar_t* pMem = static_cast<wchar_t*>(GlobalLock(hMem));
+            if (!pMem) {
+                GlobalFree(hMem);
+                CloseClipboard();
+                return;
+            }
+
+            MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, pMem, wideLength);
+            GlobalUnlock(hMem);
+
+            if (!SetClipboardData(CF_UNICODETEXT, hMem)) {
+                GlobalFree(hMem);
+                logger::warn("Failed to set clipboard data");
+            }
+        } catch (const std::exception& e) {
+            logger::error("Exception while setting clipboard text: {}", e.what());
+            if (hMem) {
+                GlobalFree(hMem);
+            }
+        }
+
+        CloseClipboard();
+    }
 
     class MouseEventListener : public RE::BSTEventSink<RE::InputEvent*> {
     public:
@@ -175,6 +369,85 @@ namespace PrismaUI::InputHandler {
             if (focusedViewIdCopy != 0) {
                 switch (uMsg) {
                     case WM_KEYDOWN: {
+                        // Handle Ctrl+V (Paste)
+                        if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'V') {
+                            bool viewHasInputFieldFocus = ViewManager::ViewHasInputFocus(focusedViewIdCopy);
+                            if (viewHasInputFieldFocus) {
+                                try {
+                                    std::string clipboardText = GetClipboardText();
+                                    if (!clipboardText.empty()) {
+                                        logger::debug("Ctrl+V: Pasting {} characters from clipboard",
+                                                      clipboardText.length());
+
+                                        // Escape text for JavaScript string
+                                        std::string escapedText = EscapeForJS(clipboardText);
+
+                                        if (escapedText.empty() && !clipboardText.empty()) {
+                                            logger::warn("Failed to escape clipboard text, paste cancelled");
+                                        } else if (!escapedText.empty()) {
+                                            // Use JavaScript execCommand to insert text properly (handles UTF-8)
+                                            std::string script =
+                                                "document.execCommand('insertText', false, '" + escapedText + "')";
+
+                                            PrismaUI::Communication::Invoke(focusedViewIdCopy, script.c_str());
+                                        }
+                                    }
+                                } catch (const std::exception& e) {
+                                    logger::error("Exception during paste operation: {}", e.what());
+                                }
+                            }
+                            handledByUI = true;
+                            break;
+                        }
+
+                        // Handle Ctrl+C (Copy)
+                        if ((GetKeyState(VK_CONTROL) & 0x8000) && wParam == 'C') {
+                            // Execute JavaScript to get selected text on ultralightThread
+                            if (g_ultralightThreadExecutor && g_viewsMap && g_viewsMapMutex) {
+                                g_ultralightThreadExecutor->submit([viewId = focusedViewIdCopy]() {
+                                    try {
+                                        std::shared_ptr<Core::PrismaView> viewData = nullptr;
+                                        {
+                                            std::shared_lock lock(*g_viewsMapMutex);
+                                            auto it = g_viewsMap->find(viewId);
+                                            if (it != g_viewsMap->end()) {
+                                                viewData = it->second;
+                                            }
+                                        }
+
+                                        if (viewData && viewData->ultralightView) {
+                                            ultralight::String script = "window.getSelection().toString()";
+                                            ultralight::String result =
+                                                viewData->ultralightView->EvaluateScript(script, nullptr, "");
+                                            std::string selectedText = result.utf8().data();
+
+                                            // Check size before copying
+                                            if (selectedText.size() > MAX_CLIPBOARD_SIZE) {
+                                                logger::warn(
+                                                    "Selected text too large to copy: {} bytes (max: {} bytes)",
+                                                    selectedText.size(), MAX_CLIPBOARD_SIZE);
+                                                return;
+                                            }
+
+                                            if (!selectedText.empty()) {
+                                                // Copy to clipboard on Skyrim main thread to avoid blocking
+                                                SKSE::GetTaskInterface()->AddTask([text = selectedText]() {
+                                                    SetClipboardText(text);
+                                                    logger::debug("Ctrl+C: Copied {} characters to clipboard",
+                                                                  text.length());
+                                                });
+                                            }
+                                        }
+                                    } catch (const std::exception& e) {
+                                        logger::error("Exception during copy operation: {}", e.what());
+                                    }
+                                });
+                            }
+                            handledByUI = true;
+                            break;
+                        }
+
+                        // Normal key processing
                         ultralight::KeyEvent keyDownEvent =
                             WinKeyHandler::CreateKeyEvent(ultralight::KeyEvent::kType_RawKeyDown, wParam, lParam);
                         {

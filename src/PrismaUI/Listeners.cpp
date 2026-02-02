@@ -46,21 +46,26 @@ namespace PrismaUI::Listeners {
         });
     }
 
-    void MyLoadListener::OnWindowObjectReady(View* /*caller*/, uint64_t /*frame_id*/, bool /*is_main_frame*/,
+    void MyLoadListener::OnWindowObjectReady(View* /*caller*/, uint64_t /*frame_id*/, bool is_main_frame,
                                              const String& /*url*/) {
-        logger::info("View [{}]: LoadListener: Window object ready.", viewId_);
+        if (is_main_frame) {
+            logger::info("View [{}]: LoadListener: Window object ready.", viewId_);
+        }
     }
 
-    void MyLoadListener::OnDOMReady(View* /*caller*/, uint64_t /*frame_id*/, bool /*is_main_frame*/,
+    void MyLoadListener::OnDOMReady(View* /*caller*/, uint64_t /*frame_id*/, bool is_main_frame,
                                     const String& /*url*/) {
-        logger::info("View [{}]: LoadListener: DOM ready.", viewId_);
-        ultralightThread.submit([id = viewId_] {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(id);
-            if (it != views.end() && it->second->domReadyCallback) {
-                it->second->domReadyCallback(id);
-            }
-        });
+        if (is_main_frame) {
+            logger::info("View [{}]: LoadListener: DOM ready.", viewId_);
+
+            ultralightThread.submit([id = viewId_] {
+                std::shared_lock lock(viewsMutex);
+                auto it = views.find(id);
+                if (it != views.end() && it->second->domReadyCallback) {
+                    it->second->domReadyCallback(id);
+                }
+            });
+        }
     }
 
     // MyViewListener

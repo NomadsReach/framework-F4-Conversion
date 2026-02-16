@@ -93,6 +93,13 @@ if (Test-Path $gitmodulesPath) {
         elseif (Test-Path $gitEntry -PathType Leaf) {
             # .git is a file pointing to the parent repo's modules dir -- correct
             Write-Host "    OK (proper submodule reference)" -ForegroundColor Green
+            # Clean untracked files and reset modifications so checkout can succeed
+            Write-Host "    Cleaning working tree..." -ForegroundColor Gray
+            $savedEAP = $ErrorActionPreference
+            $ErrorActionPreference = 'SilentlyContinue'
+            git -C $fullPath clean -ffd
+            git -C $fullPath checkout .
+            $ErrorActionPreference = $savedEAP
         }
         elseif (Test-Path $gitEntry -PathType Container) {
             # .git is a directory -- this is a standalone clone, not a submodule

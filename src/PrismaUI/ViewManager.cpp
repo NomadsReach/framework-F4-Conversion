@@ -88,13 +88,13 @@ namespace PrismaUI::ViewManager {
         }
 
         auto controlMap = RE::ControlMap::GetSingleton();
-        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kWheelZoom, true);
-        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kLooking, true);
-        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kJumping, true);
-        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kMovement, true);
-        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kActivate, true);
-        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kPOVSwitch, true);
-        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kVATS, true);
+        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kWheelZoom, true, false);
+        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kLooking, true, false);
+        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kJumping, true, false);
+        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kMovement, true, false);
+        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kActivate, true, false);
+        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kPOVSwitch, true, false);
+        controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kVATS, true, false);
     }
 
     void Show(const Core::PrismaViewId& viewId) {
@@ -244,13 +244,13 @@ namespace PrismaUI::ViewManager {
             }
 
             auto controlMap = RE::ControlMap::GetSingleton();
-            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kWheelZoom, false);
-            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kLooking, false);
-            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kJumping, false);
-            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kMovement, false);
-            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kActivate, false);
-            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kPOVSwitch, false);
-            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kVATS, false);
+            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kWheelZoom, false, false);
+            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kLooking, false, false);
+            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kJumping, false, false);
+            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kMovement, false, false);
+            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kActivate, false, false);
+            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kPOVSwitch, false, false);
+            controlMap->ToggleControls(RE::UserEvents::USER_EVENT_FLAG::kVATS, false, false);
 
             if (pauseGame) {
                 auto ui = RE::UI::GetSingleton();

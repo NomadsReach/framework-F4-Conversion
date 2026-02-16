@@ -3,13 +3,22 @@ param(
     [int]$threads = 8
 )
 
+$vsDevShellPath = "C:/Program Files/Microsoft Visual Studio/2022/Professional/Common7/Tools/Launch-VsDevShell.ps1"
+# Load in template default variables
+if (Test-Path .\Build_Config_Template.ps1) {
+    . .\Build_Config_Template.ps1
+}
+# Load in local variable overrides
+if (Test-Path .\Build_Config_Local.ps1) {
+    . .\Build_Config_Local.ps1
+}
 
-Write-Host "Running preset $preset"
 
 # Save current directory, launch VS dev shell, and return to original directory
-$vsDevShellPath = "C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/Tools/Launch-VsDevShell.ps1"
 $currentDirectory = $PWD.Path
 & $vsDevShellPath -Arch amd64; Set-Location -Path "${currentDirectory}"
+
+Write-Host "Running preset $preset"
 
 # Build cmake configure arguments
 $cmakeArgs = @("-S", ".", "--preset=$preset", "-DCMAKE_COMPILE_JOBS=$threads", "-Wno-dev")

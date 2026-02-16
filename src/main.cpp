@@ -60,3 +60,7 @@ RequestPluginAPI(const PRISMA_UI_API::InterfaceVersion a_interfaceVersion) {
 
   return nullptr;
 }
+
+extern "C" DLLEXPORT uint32_t SKSEAPI GetPrismaUIAPIVersion() {
+  return 2;
+}

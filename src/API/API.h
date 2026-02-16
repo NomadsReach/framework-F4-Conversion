@@ -40,6 +40,9 @@ public:
 		virtual int GetOrder(PrismaView view) noexcept override;
 		virtual bool HasAnyActiveFocus() noexcept override;
 
+		// Console message callback
+		virtual void RegisterConsoleCallback(PrismaView view, PRISMA_UI_API::ConsoleMessageCallback callback) noexcept override;
+
 		// Inspector methods
 		virtual void CreateInspectorView(PrismaView view) noexcept override;
 		virtual void SetInspectorVisibility(PrismaView view, bool visible) noexcept override;

@@ -4,11 +4,9 @@ param(
 )
 
 $vsDevShellPath = "C:/Program Files/Microsoft Visual Studio/2022/Professional/Common7/Tools/Launch-VsDevShell.ps1"
-# Load in template default variables
-if (Test-Path .\Build_Config_Template.ps1) {
-    . .\Build_Config_Template.ps1
-}
+
 # Load in local variable overrides
+# local developer copy of Build_Config_Template.ps1 to override $vsDevShellPath or other variables if needed
 if (Test-Path .\Build_Config_Local.ps1) {
     . .\Build_Config_Local.ps1
 }

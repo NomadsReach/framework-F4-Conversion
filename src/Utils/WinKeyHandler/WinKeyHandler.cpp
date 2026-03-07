@@ -1,4 +1,4 @@
-﻿#include "WinKeyHandler.h"
+#include "WinKeyHandler.h"
 
 namespace WinKeyHandler {
 	int WinKeyToUltralightKey(UINT win_key) {
@@ -12,7 +12,17 @@ namespace WinKeyHandler {
 		case VK_MENU: return GK_MENU;
 		case VK_PAUSE: return GK_PAUSE;
 		case VK_CAPITAL: return GK_CAPITAL;
+		case VK_KANA: return GK_KANA;
+		case VK_IME_ON: return GK_IME_ON;
+		case VK_JUNJA: return GK_JUNJA;
+		case VK_FINAL: return GK_FINAL;
+		case VK_HANJA: return GK_HANJA;
+		case VK_IME_OFF: return GK_IME_OFF;
 		case VK_ESCAPE: return GK_ESCAPE;
+		case VK_CONVERT: return GK_CONVERT;
+		case VK_NONCONVERT: return GK_NONCONVERT;
+		case VK_ACCEPT: return GK_ACCEPT;
+		case VK_MODECHANGE: return GK_MODECHANGE;
 		case VK_SPACE: return GK_SPACE;
 		case VK_END: return GK_END;
 		case VK_HOME: return GK_HOME;
@@ -121,6 +131,8 @@ namespace WinKeyHandler {
 		case VK_RCONTROL: return GK_RCONTROL;
 		case VK_LMENU: return GK_LMENU;
 		case VK_RMENU: return GK_RMENU;
+		case VK_PROCESSKEY: return GK_PROCESSKEY;
+		case VK_PACKET: return GK_PACKET;
 
 		case VK_OEM_1:      return GK_OEM_1;
 		case VK_OEM_PLUS:   return GK_OEM_PLUS;
@@ -160,25 +172,10 @@ namespace WinKeyHandler {
 	}
 
 	ultralight::KeyEvent CreateKeyEvent(ultralight::KeyEvent::Type type, WPARAM wParam, LPARAM lParam) {
-		ultralight::KeyEvent ev;
-		ev.type = type;
-		GetUltralightModifiers(ev);
-
-		ev.virtual_key_code = WinKeyToUltralightKey(static_cast<UINT>(wParam));
-
-		ev.key_identifier = ultralight::String(GetUltralightKeyIdentifier(ev.virtual_key_code).c_str());
-
-		ev.text = "";
-		ev.unmodified_text = "";
-
-		// Keypad keys are VK_NUMPAD0-VK_DIVIDE. KF_EXTENDED is set for non-keypad
-		// extended keys (navigation cluster, right Ctrl/Alt), so don't use it here.
-		ev.is_keypad = (wParam >= VK_NUMPAD0 && wParam <= VK_DIVIDE);
-		ev.is_auto_repeat = (HIWORD(lParam) & KF_REPEAT) == KF_REPEAT;
-		ev.is_system_key = (ev.modifiers & ultralight::KeyEvent::kMod_AltKey) &&
+		bool isSystemKey = (GetKeyState(VK_MENU) < 0) &&
 			(wParam == VK_TAB || wParam == VK_ESCAPE || wParam == VK_RETURN || wParam == VK_SPACE ||
 				(wParam >= VK_F1 && wParam <= VK_F24));
 
-		return ev;
+		return ultralight::KeyEvent(type, static_cast<uintptr_t>(wParam), static_cast<intptr_t>(lParam), isSystemKey);
 	}
 }

@@ -73,6 +73,7 @@ target_link_libraries(${PROJECT_NAME}
     UltralightCore
     WebCore
     comctl32  # Required for SetWindowSubclass/RemoveWindowSubclass
+    imm32     # Required for IME (Input Method Editor) support
 )
 
 # Delay-load Ultralight DLLs so they can be loaded from custom path at runtime

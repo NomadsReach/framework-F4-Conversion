@@ -4,6 +4,7 @@
 
 #include "Communication.h"
 #include "Core.h"
+#include "ImeHelper.h"
 #include "Utils/Encoding.h"
 #include "ViewManager.h"
 #pragma comment(lib, "comctl32.lib")
@@ -37,6 +38,8 @@ namespace PrismaUI::InputHandler {
     static std::atomic<bool> g_wndProcInstalled = false;
     static constexpr UINT_PTR SUBCLASS_ID = 0x505249534D41;  // "PRISMA" in hex
     static std::mutex g_wndProcMutex;                        // Thread-safe installation
+
+    static ImeHelper g_imeHelper;
 
     // Clipboard helper functions
     std::string EscapeForJS(const std::string& text) {
@@ -432,6 +435,12 @@ namespace PrismaUI::InputHandler {
 
     LRESULT CALLBACK SubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass,
                                   DWORD_PTR /*dwRefData*/) {
+        if (uMsg == WM_IME_SETCONTEXT) {
+            LPARAM imeLParam = lParam;
+            g_imeHelper.ModifySetContextLParam(&imeLParam, uMsg);
+            lParam = imeLParam;
+        }
+
         if (g_isAnyInputCaptureActive.load()) {
             bool handledByUI = false;
             Core::PrismaViewId focusedViewIdCopy;
@@ -441,6 +450,12 @@ namespace PrismaUI::InputHandler {
             }
 
             if (focusedViewIdCopy != 0) {
+                if (g_imeHelper.HandleMessage(hwnd, uMsg, wParam, lParam, focusedViewIdCopy, &handledByUI)) {
+                    if (handledByUI) {
+                        return 0;
+                    }
+                }
+
                 switch (uMsg) {
                     case WM_KEYDOWN: {
                         // Handle Ctrl+V (Paste)
@@ -627,6 +642,15 @@ namespace PrismaUI::InputHandler {
 
         logger::info("PrismaUI::InputHandler Initialized with HWND: {}", (void*)g_hWnd);
 
+        g_imeHelper.SetCallbacks(
+            [](const std::string& s) { return EscapeForJS(s); },
+            [](const std::wstring& ws, LPARAM lp) { QueueCommittedCharEvent(ws, lp); },
+            [](const wchar_t* p, int len) { return ConvertUtf16ToUtf8(p, len); });
+        g_imeHelper.SetContext({g_hWnd, g_viewsMap, g_viewsMapMutex, &g_focusedViewIdMutex,
+                                &g_currentlyFocusedViewId, &g_isAnyInputCaptureActive});
+        g_imeHelper.SetExecutor(g_ultralightThreadExecutor);
+        g_imeHelper.Initialize(g_hWnd);
+
         auto inputEventSource = RE::BSInputDeviceManager::GetSingleton();
         if (inputEventSource) {
             inputEventSource->AddEventSink(MouseEventListener::GetSingleton());
@@ -703,6 +727,8 @@ namespace PrismaUI::InputHandler {
             logger::debug("PrismaUI Input Capture System Enabled for View [{}].", viewId);
         }
 
+        g_imeHelper.UpdateStateForFocusedView(viewId);
+
         g_mouseButtonStates[0] = g_mouseButtonStates[1] = g_mouseButtonStates[2] = false;
     }
 
@@ -722,6 +748,10 @@ namespace PrismaUI::InputHandler {
 
         if (disableSystem) {
             if (g_isAnyInputCaptureActive.exchange(false)) {
+                if (currentFocusedBeforeDisable != 0) {
+                    g_imeHelper.ClearStateInJS(currentFocusedBeforeDisable);
+                }
+                g_imeHelper.SetAssociation(false);
                 logger::debug("PrismaUI Input Capture System Disabled (was active for View [{}]).",
                               currentFocusedBeforeDisable);
 
@@ -795,6 +825,8 @@ namespace PrismaUI::InputHandler {
         }
 
         g_ultralightThreadExecutor->submit([viewId_copy = focusedViewIdCopy, ev_queue = std::move(eventsToProcess)]() {
+            g_imeHelper.UpdateStateForFocusedView(viewId_copy);
+
             std::shared_ptr<Core::PrismaView> targetViewData = nullptr;
             {
                 std::shared_lock lock(*g_viewsMapMutex);
@@ -896,6 +928,8 @@ namespace PrismaUI::InputHandler {
         }
 
         UninstallWndProcHook();
+
+        g_imeHelper.Shutdown(g_hWnd);
 
         g_hWnd = nullptr;
         g_ultralightThreadExecutor = nullptr;

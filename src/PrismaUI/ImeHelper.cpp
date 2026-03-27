@@ -8,8 +8,6 @@
 #include "Core.h"
 #include "ViewManager.h"
 
-#include <SKSE/SKSE.h>
-
 namespace PrismaUI {
 
 namespace {
@@ -25,6 +23,11 @@ struct ImeUiState {
     int caret = 0;
     ImeCandidateState candidateState;
 };
+
+UINT GetImeAssociationMessageId() {
+    static const UINT kMessageId = RegisterWindowMessageW(L"PrismaUI.ImeAssociation");
+    return kMessageId;
+}
 
 std::string EscapeForJson(const std::string& s) {
     std::string r;
@@ -93,6 +96,46 @@ void ImeHelper::Initialize(HWND hwnd) {
             logger::warn("IME: Failed to create IME context");
         }
     }
+
+    // Start with IME disassociated. The active text input state drives
+    // association via posted window-thread messages.
+    m_associated = false;
+}
+
+bool ImeHelper::IsTextInputFocused() const {
+    return m_ctx.isTextInputFocused && m_ctx.isTextInputFocused->load();
+}
+
+void ImeHelper::DispatchScriptToView(Core::PrismaViewId viewId, const std::string& script) {
+    if (!viewId || script.empty()) {
+        return;
+    }
+
+    if (m_executor && m_executor->IsWorkerThread() && m_ctx.viewsMap && m_ctx.viewsMapMutex) {
+        std::shared_ptr<Core::PrismaView> viewData = nullptr;
+        {
+            std::shared_lock lock(*m_ctx.viewsMapMutex);
+            auto it = m_ctx.viewsMap->find(viewId);
+            if (it != m_ctx.viewsMap->end()) {
+                viewData = it->second;
+            }
+        }
+
+        if (!viewData || !viewData->ultralightView) {
+            return;
+        }
+
+        try {
+            viewData->ultralightView->EvaluateScript(ultralight::String(script.c_str()), nullptr, "");
+        } catch (const std::exception& e) {
+            logger::error("IME: Failed to dispatch state to View [{}]: {}", viewId, e.what());
+        } catch (...) {
+            logger::error("IME: Failed to dispatch state to View [{}]: unknown exception", viewId);
+        }
+        return;
+    }
+
+    Communication::Invoke(viewId, script.c_str());
 }
 
 void ImeHelper::Shutdown(HWND hwnd) {
@@ -114,14 +157,30 @@ void ImeHelper::Shutdown(HWND hwnd) {
 void ImeHelper::SetAssociation(bool enabled) {
     if (!m_context || !m_ctx.hwnd) return;
 
-    const bool previous = m_associated.exchange(enabled);
+    const bool previous = m_associated.load();
     if (previous == enabled) return;
 
-    // ImmAssociateContext must run on the thread that owns the window (main thread).
     HWND hwnd = m_ctx.hwnd;
-
     HIMC himc = enabled ? m_context : nullptr;
-    SKSE::GetTaskInterface()->AddTask([hwnd, himc]() { ImmAssociateContext(hwnd, himc); });
+    if (!PostMessage(hwnd, GetImeAssociationMessageId(), enabled ? 1 : 0, reinterpret_cast<LPARAM>(himc))) {
+        logger::warn("IME: Failed to post association change (enabled={})", enabled);
+        return;
+    }
+
+    m_associated = enabled;
+}
+
+bool ImeHelper::HandleControlMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT* outResult) {
+    if (uMsg != GetImeAssociationMessageId()) {
+        return false;
+    }
+
+    HIMC himc = wParam ? reinterpret_cast<HIMC>(lParam) : nullptr;
+    ImmAssociateContext(hwnd, himc);
+    if (outResult) {
+        *outResult = 0;
+    }
+    return true;
 }
 
 void ImeHelper::ModifySetContextLParam(LPARAM* lParam, UINT uMsg) {
@@ -278,7 +337,7 @@ void ImeHelper::SendStateToJS(Core::PrismaViewId viewId, HWND hwnd, bool active)
 
     const std::string script =
         "window.dispatchEvent(new CustomEvent('prismaIME_state',{detail:JSON.parse('" + escapedJson + "')}))";
-    Communication::Invoke(viewId, script.c_str());
+    DispatchScriptToView(viewId, script);
 }
 
 bool ImeHelper::HandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
@@ -286,6 +345,7 @@ bool ImeHelper::HandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam
     if (!outHandled || focusedViewId == 0) return false;
 
     if (!m_associated.load()) return false;
+    if (!IsTextInputFocused()) return false;
 
     switch (uMsg) {
         case WM_IME_STARTCOMPOSITION:
@@ -333,7 +393,6 @@ bool ImeHelper::HandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam
 void ImeHelper::UpdateStateImpl(Core::PrismaViewId viewId) {
     if (!m_ctx.viewsMap || !m_ctx.viewsMapMutex || viewId == 0) {
         m_lastKnownTextInputFocus = false;
-        SetAssociation(false);
         return;
     }
 
@@ -347,27 +406,15 @@ void ImeHelper::UpdateStateImpl(Core::PrismaViewId viewId) {
     if (!stillFocused) {
         m_lastKnownTextInputFocus = false;
         ClearStateInJS(viewId);
-        SetAssociation(false);
         return;
     }
 
-    std::shared_ptr<Core::PrismaView> targetViewData = nullptr;
-    {
-        std::shared_lock lock(*m_ctx.viewsMapMutex);
-        auto it = m_ctx.viewsMap->find(viewId);
-        if (it != m_ctx.viewsMap->end()) {
-            targetViewData = it->second;
-        }
-    }
-
-    const bool textInputFocused =
-        targetViewData && targetViewData->ultralightView && targetViewData->ultralightView->HasInputFocus();
+    const bool textInputFocused = IsTextInputFocused();
     m_lastKnownTextInputFocus = textInputFocused;
 
     if (!textInputFocused) {
         ClearStateInJS(viewId);
     }
-    SetAssociation(textInputFocused);
 }
 
 void ImeHelper::UpdateStateForFocusedView(Core::PrismaViewId viewId) {

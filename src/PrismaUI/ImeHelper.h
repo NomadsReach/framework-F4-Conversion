@@ -26,6 +26,7 @@ struct ImeHelperContext {
     std::mutex* focusedViewIdMutex = nullptr;
     Core::PrismaViewId* currentlyFocusedViewId = nullptr;
     std::atomic<bool>* isAnyInputCaptureActive = nullptr;
+    std::atomic<bool>* isTextInputFocused = nullptr;
 };
 
 // Custom IME composition support: reads Windows IME state and dispatches to JS
@@ -65,6 +66,9 @@ public:
     bool HandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
                        Core::PrismaViewId focusedViewId, bool* outHandled);
 
+    // Handle internal control messages that must run on the window thread.
+    bool HandleControlMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT* outResult);
+
     // Modify lParam for WM_IME_SETCONTEXT (suppress native IME UI). Call before DefSubclassProc.
     void ModifySetContextLParam(LPARAM* lParam, UINT uMsg);
 
@@ -72,6 +76,8 @@ public:
     static const char* MessageName(UINT uMsg);
 
 private:
+    void DispatchScriptToView(Core::PrismaViewId viewId, const std::string& script);
+    bool IsTextInputFocused() const;
     void UpdateStateImpl(Core::PrismaViewId viewId);
 
     HIMC m_context = nullptr;

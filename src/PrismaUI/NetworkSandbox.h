@@ -4,30 +4,6 @@
 
 namespace PrismaUI::NetworkSandbox {
 
-///
-/// Injected into every Ultralight view's JS context in OnWindowObjectReady,
-/// BEFORE any page scripts execute.
-///
-/// Layer 1 — JS API kill:
-///   Overwrites fetch, XMLHttpRequest, WebSocket, EventSource, Worker, SharedWorker,
-///   navigator.sendBeacon, navigator.serviceWorker with undefined using
-///   Object.defineProperty({configurable:false}). Page scripts cannot redefine or
-///   delete these descriptors after injection.
-///
-/// Layer 2 — CSP meta injection with whitelist support:
-///   Inserts <meta http-equiv="Content-Security-Policy"> as the first child of <head>
-///   before DOM scripts parse. Allows whitelisted domains (static.wikia.nocookie.net, etc.)
-///   to load images, scripts, and styles. connect-src:'none' blocks remaining network.
-///
-/// Layer 3 — Domain whitelist:
-///   See URLWhitelist.h to add trusted domains (wikis, CDNs, asset servers).
-///   Automatically included in CSP directives at runtime.
-///
-/// What this does NOT block:
-///   - Whitelisted domains (checked in URLWhitelist::IsWhitelisted)
-///   - dynamic import() — out of scope for CSP enforcement
-///   - Non-JS DLL code making WinSock calls directly — out of scope
-///
 constexpr const char* kNetworkBlockScript = R"js(
 (function(){
 'use strict';

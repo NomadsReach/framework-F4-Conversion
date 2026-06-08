@@ -170,9 +170,6 @@ namespace PRISMA_UI_API {
 
     typedef void* (*RequestPluginAPIFunc)(InterfaceVersion interfaceVersion);
 
-    /// Request the PrismaUI API interface.
-    /// Recommended: Send your request during or after F4SE::MessagingInterface::kGameDataReady to make sure the dll
-    /// has already been loaded.
     [[nodiscard]] inline void* RequestPluginAPI(InterfaceVersion a_interfaceVersion = InterfaceVersion::V3) {
         // NewCommonLib (xmake-based) uses REX::W32 instead of F4SE::WinAPI.
         // Raw Win32 calls work with both old and new CommonLib builds.
@@ -191,12 +188,6 @@ namespace PRISMA_UI_API {
         return nullptr;
     }
 
-    /// Request a specific PrismaUI API interface version.
-    /// Returns nullptr if the loaded PrismaUI DLL does not support the requested version.
-    ///
-    /// Usage:
-    ///   auto* api = PRISMA_UI_API::RequestPluginAPI<PRISMA_UI_API::IVPrismaUI4>(); // recommended
-    ///   auto* api = PRISMA_UI_API::RequestPluginAPI<PRISMA_UI_API::IVPrismaUI3>(); // legacy
     template <typename T>
     [[nodiscard]] inline T* RequestPluginAPI() {
         return static_cast<T*>(RequestPluginAPI(InterfaceVersionMap<T>::version));

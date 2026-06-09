@@ -4,10 +4,31 @@
 #include "Utils/DllLoader.h"
 #include "PrismaUI/NotificationSystem.h"
 #include <tlhelp32.h>
+#include <filesystem>
 
 static bool g_overlayDetected = false;
 static bool g_pluginDisabled = false;
 static std::string g_detectedOverlayName;
+
+namespace {
+    // Returns the path to Data\F4SE\Plugins\PrismaUI_F4.ini by deriving it
+    // from the DLL's own location (the DLL lives in that same folder).
+    static std::string GetIniPath() {
+        wchar_t modPath[MAX_PATH] = {};
+        GetModuleFileNameW(GetModuleHandleW(L"PrismaUI_F4.dll"), modPath, MAX_PATH);
+        auto ini = std::filesystem::path(modPath).replace_extension(L".ini");
+        return ini.string();
+    }
+
+    // Read a bool (0/1) from [section] key in PrismaUI_F4.ini.
+    // Returns defaultValue when the file or key is absent.
+    static bool ReadIniBool(const char* section, const char* key, bool defaultValue) {
+        const std::string path = GetIniPath();
+        const int def = defaultValue ? 1 : 0;
+        const int val = GetPrivateProfileIntA(section, key, def, path.c_str());
+        return val != 0;
+    }
+}
 
 namespace {
     bool IsConflictingOverlayRunning() {
@@ -122,11 +143,18 @@ F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_intfc)
 
     g_overlayDetected = IsConflictingOverlayRunning();
     if (g_overlayDetected) {
+        const bool allowOverlays = ReadIniBool("Compatibility", "bAllowOverlays", false);
         logger::warn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        logger::warn("[PrismaUI] Overlay detected - exiting before game launch");
-        logger::warn("Detected: {}", g_detectedOverlayName);
-        logger::warn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        NotifyUserOverlayDetected();
+        logger::warn("[PrismaUI] Overlay detected: {}", g_detectedOverlayName);
+        if (allowOverlays) {
+            logger::warn("[PrismaUI] bAllowOverlays=1 in PrismaUI_F4.ini — continuing anyway");
+            logger::warn("[PrismaUI] Rendering artifacts or crashes may occur. Use at your own risk.");
+            logger::warn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        } else {
+            logger::warn("[PrismaUI] Exiting. Set bAllowOverlays=1 in PrismaUI_F4.ini to suppress this.");
+            logger::warn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            NotifyUserOverlayDetected();
+        }
     }
 
     const auto* messaging = F4SE::GetMessagingInterface();

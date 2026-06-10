@@ -112,23 +112,47 @@ namespace {
         tdc.pszFooterIcon         = TD_INFORMATION_ICON;
         tdc.pfCallback            = OverlayDialogCallback;
 
-        // TaskDialogIndirect requires comctl32 v6, which needs an activation context.
-        // The host EXE (Fallout4.exe OG) only activates comctl32 v5, so we manually
-        // activate the manifest embedded in this DLL (resource ID 2) around the call.
-        ACTCTXW actCtx         = {};
-        actCtx.cbSize          = sizeof(actCtx);
-        actCtx.dwFlags         = ACTCTX_FLAG_RESOURCE_NAME_VALID | ACTCTX_FLAG_HMODULE_VALID;
-        actCtx.lpResourceName  = MAKEINTRESOURCEW(2);
-        actCtx.hModule         = GetModuleHandleW(L"PrismaUI_F4.dll");
+        // Activate the comctl32 v6 manifest embedded in this DLL so TaskDialogIndirect
+        // works even when the host EXE (OG Fallout4.exe) has no v6 activation context.
+        ACTCTXW actCtx        = {};
+        actCtx.cbSize         = sizeof(actCtx);
+        actCtx.dwFlags        = ACTCTX_FLAG_RESOURCE_NAME_VALID | ACTCTX_FLAG_HMODULE_VALID;
+        actCtx.lpResourceName = MAKEINTRESOURCEW(2);
+        actCtx.hModule        = GetModuleHandleW(L"PrismaUI_F4.dll");
 
-        HANDLE   hCtx   = CreateActCtxW(&actCtx);
+        HANDLE    hCtx   = CreateActCtxW(&actCtx);
         ULONG_PTR cookie = 0;
         const bool activated = (hCtx != INVALID_HANDLE_VALUE) && ActivateActCtx(hCtx, &cookie);
 
-        TaskDialogIndirect(&tdc, nullptr, nullptr, nullptr);
+        if (!activated)
+            logger::warn("[PrismaUI] Could not activate comctl32 v6 context (hCtx={}, GLE={})",
+                (void*)hCtx, GetLastError());
 
-        if (activated)              DeactivateActCtx(0, cookie);
+        // Load comctl32 within the activation context so we get the v6 entry point.
+        // Static imports resolve at load time against whatever comctl32 the EXE mapped;
+        // a fresh LoadLibrary inside the activated context picks up the SxS v6 module.
+        using FnTaskDialogIndirect = HRESULT(WINAPI*)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
+        FnTaskDialogIndirect pfnTaskDialog = nullptr;
+        HMODULE hComCtl = LoadLibraryW(L"comctl32.dll");
+        if (hComCtl)
+            pfnTaskDialog = reinterpret_cast<FnTaskDialogIndirect>(
+                GetProcAddress(hComCtl, "TaskDialogIndirect"));
+
+        HRESULT hr = E_NOTIMPL;
+        if (pfnTaskDialog)
+            hr = pfnTaskDialog(&tdc, nullptr, nullptr, nullptr);
+
+        if (hComCtl) FreeLibrary(hComCtl);
+        if (activated)                    DeactivateActCtx(0, cookie);
         if (hCtx != INVALID_HANDLE_VALUE) ReleaseActCtx(hCtx);
+
+        if (FAILED(hr)) {
+            // Fallback for hosts where TaskDialogIndirect is unavailable
+            logger::warn("[PrismaUI] TaskDialogIndirect failed (hr=0x{:08x}), using MessageBoxW fallback", (uint32_t)hr);
+            std::wstring fallback = content +
+                L"\n\nTo disable the overlay: https://www.youtube.com/watch?v=1NPqDMlYGz0";
+            MessageBoxW(nullptr, fallback.c_str(), L"PrismaUI - Overlay Detected", MB_OK | MB_ICONWARNING);
+        }
 
         // Persist the opt-in so this dialog never appears again
         const std::string iniPath = GetIniPath();

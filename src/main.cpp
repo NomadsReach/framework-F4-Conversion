@@ -88,22 +88,15 @@ namespace {
             L"This software hooks DirectX and can conflict with Ultralight rendering.\n"
             L"Click Continue to load anyway - PrismaUI will remember this choice.";
 
-        TASKDIALOG_BUTTON btn = {
-            IDOK,
-            L"Continue loading\n"
-            L"PrismaUI will load alongside the overlay. Close it if you see rendering issues."
-        };
-
         TASKDIALOGCONFIG tdc      = {};
         tdc.cbSize                = sizeof(tdc);
-        tdc.dwFlags               = TDF_ENABLE_HYPERLINKS | TDF_USE_COMMAND_LINKS |
+        tdc.dwFlags               = TDF_ENABLE_HYPERLINKS |
                                     TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
         tdc.pszWindowTitle        = L"PrismaUI Framework";
         tdc.pszMainIcon           = TD_WARNING_ICON;
         tdc.pszMainInstruction    = L"GPU Overlay Software Detected";
         tdc.pszContent            = content.c_str();
-        tdc.pButtons              = &btn;
-        tdc.cButtons              = 1;
+        tdc.dwCommonButtons       = TDCBF_OK_BUTTON;
         tdc.nDefaultButton        = IDOK;
         tdc.pszFooter             =
             L"<a href=\"https://www.youtube.com/watch?v=1NPqDMlYGz0\">"

@@ -73,12 +73,6 @@ namespace {
         return false;
     }
 
-    static HRESULT CALLBACK OverlayDialogCallback(HWND hwnd, UINT msg, WPARAM, LPARAM lParam, LONG_PTR) {
-        if (msg == TDN_HYPERLINK_CLICKED)
-            ShellExecuteW(hwnd, L"open", reinterpret_cast<LPCWSTR>(lParam), nullptr, nullptr, SW_SHOWNORMAL);
-        return S_OK;
-    }
-
     void NotifyUserOverlayDetected() {
         // Convert ASCII overlay name to wide for TaskDialog
         std::wstring overlayW(g_detectedOverlayName.begin(), g_detectedOverlayName.end());
@@ -90,20 +84,15 @@ namespace {
 
         TASKDIALOGCONFIG tdc      = {};
         tdc.cbSize                = sizeof(tdc);
-        tdc.dwFlags               = TDF_ENABLE_HYPERLINKS |
-                                    TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+        tdc.dwFlags               = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
         tdc.pszWindowTitle        = L"PrismaUI Framework";
         tdc.pszMainIcon           = TD_WARNING_ICON;
         tdc.pszMainInstruction    = L"GPU Overlay Software Detected";
         tdc.pszContent            = content.c_str();
         tdc.dwCommonButtons       = TDCBF_OK_BUTTON;
         tdc.nDefaultButton        = IDOK;
-        tdc.pszFooter             =
-            L"<a href=\"https://www.youtube.com/watch?v=1NPqDMlYGz0\">"
-            L"How to disable the RTSS overlay (video guide)"
-            L"</a>";
+        tdc.pszFooter             = L"How to disable the overlay: youtube.com/watch?v=1NPqDMlYGz0";
         tdc.pszFooterIcon         = TD_INFORMATION_ICON;
-        tdc.pfCallback            = OverlayDialogCallback;
 
         // Activate the comctl32 v6 manifest embedded in this DLL so TaskDialogIndirect
         // works even when the host EXE (OG Fallout4.exe) has no v6 activation context.

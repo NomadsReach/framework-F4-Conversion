@@ -52,7 +52,7 @@ target("PrismaUI_F4")
 
     -- Sources
     add_includedirs("src")
-    add_files("src/**.cpp")
+    add_files("src/**.cpp", "src/resource.rc")
     set_pcxxheader("src/PCH.h")
 
     -- Ultralight SDK

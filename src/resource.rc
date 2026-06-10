@@ -1,0 +1,6 @@
+#include <winuser.h>
+
+// DLL manifest - resource ID 2 is the standard slot for DLL manifests.
+// Embedding this allows CreateActCtxW(ACTCTX_FLAG_HMODULE_VALID) to activate
+// comctl32 v6 from within the DLL without touching the host EXE's manifest.
+2 RT_MANIFEST "PrismaUI_F4.manifest"

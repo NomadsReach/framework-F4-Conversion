@@ -112,7 +112,23 @@ namespace {
         tdc.pszFooterIcon         = TD_INFORMATION_ICON;
         tdc.pfCallback            = OverlayDialogCallback;
 
+        // TaskDialogIndirect requires comctl32 v6, which needs an activation context.
+        // The host EXE (Fallout4.exe OG) only activates comctl32 v5, so we manually
+        // activate the manifest embedded in this DLL (resource ID 2) around the call.
+        ACTCTXW actCtx         = {};
+        actCtx.cbSize          = sizeof(actCtx);
+        actCtx.dwFlags         = ACTCTX_FLAG_RESOURCE_NAME_VALID | ACTCTX_FLAG_HMODULE_VALID;
+        actCtx.lpResourceName  = MAKEINTRESOURCEW(2);
+        actCtx.hModule         = GetModuleHandleW(L"PrismaUI_F4.dll");
+
+        HANDLE   hCtx   = CreateActCtxW(&actCtx);
+        ULONG_PTR cookie = 0;
+        const bool activated = (hCtx != INVALID_HANDLE_VALUE) && ActivateActCtx(hCtx, &cookie);
+
         TaskDialogIndirect(&tdc, nullptr, nullptr, nullptr);
+
+        if (activated)              DeactivateActCtx(0, cookie);
+        if (hCtx != INVALID_HANDLE_VALUE) ReleaseActCtx(hCtx);
 
         // Persist the opt-in so this dialog never appears again
         const std::string iniPath = GetIniPath();

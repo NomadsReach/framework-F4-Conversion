@@ -129,8 +129,6 @@ namespace {
                 (void*)hCtx, GetLastError());
 
         // Load comctl32 within the activation context so we get the v6 entry point.
-        // Static imports resolve at load time against whatever comctl32 the EXE mapped;
-        // a fresh LoadLibrary inside the activated context picks up the SxS v6 module.
         using FnTaskDialogIndirect = HRESULT(WINAPI*)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
         FnTaskDialogIndirect pfnTaskDialog = nullptr;
         HMODULE hComCtl = LoadLibraryW(L"comctl32.dll");
@@ -138,19 +136,31 @@ namespace {
             pfnTaskDialog = reinterpret_cast<FnTaskDialogIndirect>(
                 GetProcAddress(hComCtl, "TaskDialogIndirect"));
 
-        HRESULT hr = E_NOTIMPL;
+        logger::info("[PrismaUI] overlay dialog: activated={} pfn={}", activated, (void*)pfnTaskDialog);
+
+        // nButton==0 means the dialog returned without being shown (silent failure on OG).
+        int     nButton = 0;
+        HRESULT hr      = E_NOTIMPL;
         if (pfnTaskDialog)
-            hr = pfnTaskDialog(&tdc, nullptr, nullptr, nullptr);
+            hr = pfnTaskDialog(&tdc, &nButton, nullptr, nullptr);
+
+        logger::info("[PrismaUI] TaskDialogIndirect hr=0x{:08x} nButton={}", (uint32_t)hr, nButton);
 
         if (hComCtl) FreeLibrary(hComCtl);
         if (activated)                    DeactivateActCtx(0, cookie);
         if (hCtx != INVALID_HANDLE_VALUE) ReleaseActCtx(hCtx);
 
-        if (FAILED(hr)) {
-            // Fallback for hosts where TaskDialogIndirect is unavailable
-            logger::warn("[PrismaUI] TaskDialogIndirect failed (hr=0x{:08x}), using MessageBoxW fallback", (uint32_t)hr);
-            std::wstring fallback = content +
-                L"\n\nTo disable the overlay: https://www.youtube.com/watch?v=1NPqDMlYGz0";
+        // Fall back to MessageBoxW when TaskDialog failed OR returned without any
+        // button press (nButton==0 means the window was never shown — silent on OG).
+        if (FAILED(hr) || nButton == 0) {
+            logger::warn("[PrismaUI] TaskDialogIndirect unavailable (hr=0x{:08x} nButton={}), using MessageBoxW", (uint32_t)hr, nButton);
+            std::wstring fallback =
+                L"GPU overlay software detected: " + overlayW + L"\n\n"
+                L"This software hooks DirectX and can conflict with Ultralight rendering.\n\n"
+                L"Click OK to continue loading with overlay support enabled.\n"
+                L"You may see visual artifacts - close the overlay if issues occur.\n\n"
+                L"How to disable the RTSS overlay:\n"
+                L"https://www.youtube.com/watch?v=1NPqDMlYGz0";
             MessageBoxW(nullptr, fallback.c_str(), L"PrismaUI - Overlay Detected", MB_OK | MB_ICONWARNING);
         }
 

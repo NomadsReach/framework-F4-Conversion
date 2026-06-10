@@ -74,9 +74,8 @@ namespace {
     void NotifyUserOverlayDetected() {
         std::string message = "PrismaUI detected overlay software that may conflict with rendering.\n\n";
         message += "Detected: " + g_detectedOverlayName + "\n\n";
-        message += "Click OK to allow PrismaUI to run alongside it from now on.\n";
-        message += "You may see visual artifacts — close the overlay if issues occur.\n\n";
-        message += "Fallout 4 will restart once to apply this setting.";
+        message += "Click OK to continue loading with overlay support enabled.\n";
+        message += "You may see visual artifacts - close the overlay if issues occur.";
 
         MessageBoxA(
             nullptr,
@@ -88,9 +87,7 @@ namespace {
         // Persist the opt-in so this dialog never appears again
         const std::string iniPath = GetIniPath();
         WritePrivateProfileStringA("Compatibility", "bAllowOverlays", "1", iniPath.c_str());
-        logger::warn("[PrismaUI] bAllowOverlays=1 written to {} — overlay check suppressed on next launch", iniPath);
-
-        std::exit(1);
+        logger::warn("[PrismaUI] bAllowOverlays=1 written to {} - overlay check suppressed on next launch", iniPath);
     }
 }
 

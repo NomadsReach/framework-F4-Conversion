@@ -5,6 +5,8 @@
 #include "PrismaUI/NotificationSystem.h"
 #include <tlhelp32.h>
 #include <filesystem>
+#include <commctrl.h>
+#include <shellapi.h>
 
 static bool g_overlayDetected = false;
 static bool g_pluginDisabled = false;
@@ -71,18 +73,46 @@ namespace {
         return false;
     }
 
-    void NotifyUserOverlayDetected() {
-        std::string message = "PrismaUI detected overlay software that may conflict with rendering.\n\n";
-        message += "Detected: " + g_detectedOverlayName + "\n\n";
-        message += "Click OK to continue loading with overlay support enabled.\n";
-        message += "You may see visual artifacts - close the overlay if issues occur.";
+    static HRESULT CALLBACK OverlayDialogCallback(HWND hwnd, UINT msg, WPARAM, LPARAM lParam, LONG_PTR) {
+        if (msg == TDN_HYPERLINK_CLICKED)
+            ShellExecuteW(hwnd, L"open", reinterpret_cast<LPCWSTR>(lParam), nullptr, nullptr, SW_SHOWNORMAL);
+        return S_OK;
+    }
 
-        MessageBoxA(
-            nullptr,
-            message.c_str(),
-            "PrismaUI - Overlay Detected",
-            MB_OK | MB_ICONWARNING
-        );
+    void NotifyUserOverlayDetected() {
+        // Convert ASCII overlay name to wide for TaskDialog
+        std::wstring overlayW(g_detectedOverlayName.begin(), g_detectedOverlayName.end());
+
+        std::wstring content =
+            L"Detected: " + overlayW + L"\n\n"
+            L"This software hooks DirectX and can conflict with Ultralight rendering.\n"
+            L"Click Continue to load anyway - PrismaUI will remember this choice.";
+
+        TASKDIALOG_BUTTON btn = {
+            IDOK,
+            L"Continue loading\n"
+            L"PrismaUI will load alongside the overlay. Close it if you see rendering issues."
+        };
+
+        TASKDIALOGCONFIG tdc      = {};
+        tdc.cbSize                = sizeof(tdc);
+        tdc.dwFlags               = TDF_ENABLE_HYPERLINKS | TDF_USE_COMMAND_LINKS |
+                                    TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+        tdc.pszWindowTitle        = L"PrismaUI Framework";
+        tdc.pszMainIcon           = TD_WARNING_ICON;
+        tdc.pszMainInstruction    = L"GPU Overlay Software Detected";
+        tdc.pszContent            = content.c_str();
+        tdc.pButtons              = &btn;
+        tdc.cButtons              = 1;
+        tdc.nDefaultButton        = IDOK;
+        tdc.pszFooter             =
+            L"<a href=\"https://www.youtube.com/watch?v=1NPqDMlYGz0\">"
+            L"How to disable the RTSS overlay (video guide)"
+            L"</a>";
+        tdc.pszFooterIcon         = TD_INFORMATION_ICON;
+        tdc.pfCallback            = OverlayDialogCallback;
+
+        TaskDialogIndirect(&tdc, nullptr, nullptr, nullptr);
 
         // Persist the opt-in so this dialog never appears again
         const std::string iniPath = GetIniPath();

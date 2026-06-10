@@ -74,7 +74,7 @@ target("PrismaUI_F4")
     add_packages("minhook", "directxtk", "spdlog")
 
     -- System libs
-    add_syslinks("comctl32", "imm32", "bcrypt", "version")
+    add_syslinks("comctl32", "shell32", "imm32", "bcrypt", "version")
 
     -- Preprocessor
     add_defines("WIN32_LEAN_AND_MEAN", "NOMINMAX", "_UNICODE")

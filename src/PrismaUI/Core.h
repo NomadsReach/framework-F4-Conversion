@@ -18,6 +18,7 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <future>
 #include <map>
@@ -70,6 +71,11 @@ namespace PrismaUI::Core {
         std::atomic<bool> inspectorVisible = false;
         std::atomic<bool> needsRecovery = false;  // Flag for recovery after exception
         std::atomic<int> recoveryAttempts = 0;    // Track recovery attempts to prevent loops
+
+        // --- Watchdog / health monitoring (see RunWatchdog in Core.cpp) ---
+        std::atomic<uint32_t> faultCount = 0;   // total recovery incidents over the view's lifetime
+        std::atomic<bool> quarantined = false;  // isolated after repeated faults; skipped in update/render
+        std::chrono::steady_clock::time_point createdAt = std::chrono::steady_clock::now();
 
         // Inspector rendering data
         std::vector<std::byte> inspectorPixelBuffer;

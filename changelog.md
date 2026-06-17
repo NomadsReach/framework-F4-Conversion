@@ -1,3 +1,25 @@
+## v1.8
+
+<details>
+<summary><b>Click to expand Version 1.8 Changelog</b></summary>
+
+### Stability & Memory
+- Tuned the Ultralight engine configuration to dramatically cut per-view memory usage. JavaScriptCore now sizes its heaps conservatively instead of scaling to full system RAM (override_ram_size capped at 1 GB), the initial JS heaps were shrunk (large 32 MB → 8 MB, small 1 MB → 512 KB), the WebCore resource cache was reduced (64 MB → 32 MB), the back/forward page cache was disabled, and the renderer thread count was capped at 2.
+- Resolved a class of out-of-memory crashes in heavy load orders where the framework's memory footprint, alongside many active views, starved the game's Scaleform UI heap (Scaleform allocation failures leading to a CTD).
+
+### Reliability Watchdog
+- Added a health monitor for every hosted plugin view. Every 30 seconds it logs a summary (view count, visible/hidden/quarantined, faulting views, process working set) plus a detail line per problem view, so a misbehaving plugin is easy to identify from the log.
+- Views that repeatedly fail crash-recovery are now quarantined — isolated from the renderer so a single broken view can no longer destabilize the framework or the game. The view handle stays valid, so the owning plugin keeps working and can recreate it.
+- Under high process-memory pressure, the render buffers (CPU pixel buffer and GPU texture) of hidden views are reclaimed automatically and regenerated losslessly when the view is shown again.
+
+### Input & Interaction
+- Added click-through for transparent regions of a focused view: a click over an empty (transparent) area now passes to the game — for example to interact with a 3D model rendered behind the interface — while a drag that began over real UI content stays captured until release.
+- Fixed mouse input capture by retaining the focus menu's modal flag; without it, the menu beneath could steal mouse input through the game's device layer.
+
+</details>
+
+---
+
 ## v1.7
 
 <details>

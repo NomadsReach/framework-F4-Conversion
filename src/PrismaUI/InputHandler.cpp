@@ -24,6 +24,34 @@ namespace PrismaUI::InputHandler {
     std::mutex g_eventQueueMutex;
     std::vector<InputEvent> g_eventQueue;
 
+    // Click-through: a mouse button press over a TRANSPARENT part of the focused
+    // view (e.g. where the game renders a 3D model behind the UI) is passed to the
+    // game instead of being captured. A drag that started over real UI content stays
+    // captured until release, so UI drags don't break when the cursor leaves content.
+    bool g_pointerDragOwnedByUI = false;
+
+    // True if the focused view has visible (opaque-enough) UI content at client (x,y).
+    static bool IsCursorOverContent(const Core::PrismaViewId& viewId, int x, int y) {
+        if (viewId == 0 || !g_viewsMap || !g_viewsMapMutex) return true;
+        std::shared_ptr<Core::PrismaView> vd;
+        {
+            std::shared_lock<std::shared_mutex> lock(*g_viewsMapMutex);
+            auto it = g_viewsMap->find(viewId);
+            if (it != g_viewsMap->end()) vd = it->second;
+        }
+        if (!vd) return true;
+        std::lock_guard<std::mutex> lock(vd->bufferMutex);
+        if (vd->pixelBuffer.empty() || vd->bufferWidth == 0 || vd->bufferHeight == 0 || vd->bufferStride == 0)
+            return true;  // no frame captured yet → default to capturing input
+        if (x < 0 || y < 0 ||
+            static_cast<uint32_t>(x) >= vd->bufferWidth ||
+            static_cast<uint32_t>(y) >= vd->bufferHeight)
+            return false;  // outside the view → let it pass through
+        const size_t off = static_cast<size_t>(y) * vd->bufferStride + static_cast<size_t>(x) * 4u + 3u;  // BGRA, alpha at +3
+        if (off >= vd->pixelBuffer.size()) return true;
+        return std::to_integer<std::uint8_t>(vd->pixelBuffer[off]) >= 12;  // alpha threshold for "real UI"
+    }
+
     const int SCROLL_LINES_PER_WHEEL_DELTA = 1;
 
     // Clipboard safety limits
@@ -581,77 +609,97 @@ namespace PrismaUI::InputHandler {
                         g_eventQueue.emplace_back(ev);
                         break;
                     }
-                    // Mouse buttons
+                    // Mouse buttons. Each press alpha-tests the cursor: over UI
+                    // content it is captured (queued + handledByUI); over a
+                    // transparent region it falls through to the game (handledByUI
+                    // stays false), letting the player interact with the 3D model
+                    // behind the view. Releases honour the press's owner so UI drags
+                    // still receive their mouseup after the cursor leaves content.
                     case WM_LBUTTONDOWN: {
+                        const bool wasAnyDown = g_mouseButtonStates[0] || g_mouseButtonStates[1] || g_mouseButtonStates[2];
                         g_mouseButtonStates[0] = true;
+                        const int mx = static_cast<int>(LOWORD(lParam));
+                        const int my = static_cast<int>(HIWORD(lParam));
+                        if (!wasAnyDown) g_pointerDragOwnedByUI = IsCursorOverContent(focusedViewIdCopy, mx, my);
+                        if (!g_pointerDragOwnedByUI) break;  // pass to game
                         ultralight::MouseEvent ev;
                         ev.type = ultralight::MouseEvent::kType_MouseDown;
-                        ev.x = static_cast<int>(LOWORD(lParam));
-                        ev.y = static_cast<int>(HIWORD(lParam));
-                        ev.button = ultralight::MouseEvent::kButton_Left;
-                        std::lock_guard lock(g_eventQueueMutex);
-                        g_eventQueue.emplace_back(ev);
+                        ev.x = mx; ev.y = my; ev.button = ultralight::MouseEvent::kButton_Left;
+                        { std::lock_guard lock(g_eventQueueMutex); g_eventQueue.emplace_back(ev); }
                         handledByUI = true;
                         break;
                     }
                     case WM_LBUTTONUP: {
                         g_mouseButtonStates[0] = false;
-                        ultralight::MouseEvent ev;
-                        ev.type = ultralight::MouseEvent::kType_MouseUp;
-                        ev.x = static_cast<int>(LOWORD(lParam));
-                        ev.y = static_cast<int>(HIWORD(lParam));
-                        ev.button = ultralight::MouseEvent::kButton_Left;
-                        std::lock_guard lock(g_eventQueueMutex);
-                        g_eventQueue.emplace_back(ev);
-                        handledByUI = true;
+                        const bool capture = g_pointerDragOwnedByUI;
+                        if (capture) {
+                            ultralight::MouseEvent ev;
+                            ev.type = ultralight::MouseEvent::kType_MouseUp;
+                            ev.x = static_cast<int>(LOWORD(lParam));
+                            ev.y = static_cast<int>(HIWORD(lParam));
+                            ev.button = ultralight::MouseEvent::kButton_Left;
+                            { std::lock_guard lock(g_eventQueueMutex); g_eventQueue.emplace_back(ev); }
+                            handledByUI = true;
+                        }
+                        if (!(g_mouseButtonStates[0] || g_mouseButtonStates[1] || g_mouseButtonStates[2])) g_pointerDragOwnedByUI = false;
                         break;
                     }
                     case WM_RBUTTONDOWN: {
+                        const bool wasAnyDown = g_mouseButtonStates[0] || g_mouseButtonStates[1] || g_mouseButtonStates[2];
                         g_mouseButtonStates[1] = true;
+                        const int mx = static_cast<int>(LOWORD(lParam));
+                        const int my = static_cast<int>(HIWORD(lParam));
+                        if (!wasAnyDown) g_pointerDragOwnedByUI = IsCursorOverContent(focusedViewIdCopy, mx, my);
+                        if (!g_pointerDragOwnedByUI) break;
                         ultralight::MouseEvent ev;
                         ev.type = ultralight::MouseEvent::kType_MouseDown;
-                        ev.x = static_cast<int>(LOWORD(lParam));
-                        ev.y = static_cast<int>(HIWORD(lParam));
-                        ev.button = ultralight::MouseEvent::kButton_Right;
-                        std::lock_guard lock(g_eventQueueMutex);
-                        g_eventQueue.emplace_back(ev);
+                        ev.x = mx; ev.y = my; ev.button = ultralight::MouseEvent::kButton_Right;
+                        { std::lock_guard lock(g_eventQueueMutex); g_eventQueue.emplace_back(ev); }
                         handledByUI = true;
                         break;
                     }
                     case WM_RBUTTONUP: {
                         g_mouseButtonStates[1] = false;
-                        ultralight::MouseEvent ev;
-                        ev.type = ultralight::MouseEvent::kType_MouseUp;
-                        ev.x = static_cast<int>(LOWORD(lParam));
-                        ev.y = static_cast<int>(HIWORD(lParam));
-                        ev.button = ultralight::MouseEvent::kButton_Right;
-                        std::lock_guard lock(g_eventQueueMutex);
-                        g_eventQueue.emplace_back(ev);
-                        handledByUI = true;
+                        const bool capture = g_pointerDragOwnedByUI;
+                        if (capture) {
+                            ultralight::MouseEvent ev;
+                            ev.type = ultralight::MouseEvent::kType_MouseUp;
+                            ev.x = static_cast<int>(LOWORD(lParam));
+                            ev.y = static_cast<int>(HIWORD(lParam));
+                            ev.button = ultralight::MouseEvent::kButton_Right;
+                            { std::lock_guard lock(g_eventQueueMutex); g_eventQueue.emplace_back(ev); }
+                            handledByUI = true;
+                        }
+                        if (!(g_mouseButtonStates[0] || g_mouseButtonStates[1] || g_mouseButtonStates[2])) g_pointerDragOwnedByUI = false;
                         break;
                     }
                     case WM_MBUTTONDOWN: {
+                        const bool wasAnyDown = g_mouseButtonStates[0] || g_mouseButtonStates[1] || g_mouseButtonStates[2];
                         g_mouseButtonStates[2] = true;
+                        const int mx = static_cast<int>(LOWORD(lParam));
+                        const int my = static_cast<int>(HIWORD(lParam));
+                        if (!wasAnyDown) g_pointerDragOwnedByUI = IsCursorOverContent(focusedViewIdCopy, mx, my);
+                        if (!g_pointerDragOwnedByUI) break;
                         ultralight::MouseEvent ev;
                         ev.type = ultralight::MouseEvent::kType_MouseDown;
-                        ev.x = static_cast<int>(LOWORD(lParam));
-                        ev.y = static_cast<int>(HIWORD(lParam));
-                        ev.button = ultralight::MouseEvent::kButton_Middle;
-                        std::lock_guard lock(g_eventQueueMutex);
-                        g_eventQueue.emplace_back(ev);
+                        ev.x = mx; ev.y = my; ev.button = ultralight::MouseEvent::kButton_Middle;
+                        { std::lock_guard lock(g_eventQueueMutex); g_eventQueue.emplace_back(ev); }
                         handledByUI = true;
                         break;
                     }
                     case WM_MBUTTONUP: {
                         g_mouseButtonStates[2] = false;
-                        ultralight::MouseEvent ev;
-                        ev.type = ultralight::MouseEvent::kType_MouseUp;
-                        ev.x = static_cast<int>(LOWORD(lParam));
-                        ev.y = static_cast<int>(HIWORD(lParam));
-                        ev.button = ultralight::MouseEvent::kButton_Middle;
-                        std::lock_guard lock(g_eventQueueMutex);
-                        g_eventQueue.emplace_back(ev);
-                        handledByUI = true;
+                        const bool capture = g_pointerDragOwnedByUI;
+                        if (capture) {
+                            ultralight::MouseEvent ev;
+                            ev.type = ultralight::MouseEvent::kType_MouseUp;
+                            ev.x = static_cast<int>(LOWORD(lParam));
+                            ev.y = static_cast<int>(HIWORD(lParam));
+                            ev.button = ultralight::MouseEvent::kButton_Middle;
+                            { std::lock_guard lock(g_eventQueueMutex); g_eventQueue.emplace_back(ev); }
+                            handledByUI = true;
+                        }
+                        if (!(g_mouseButtonStates[0] || g_mouseButtonStates[1] || g_mouseButtonStates[2])) g_pointerDragOwnedByUI = false;
                         break;
                     }
                     // Scroll wheel

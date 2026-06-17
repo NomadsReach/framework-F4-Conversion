@@ -34,7 +34,8 @@ FocusMenu::FocusMenu()
 
     this->menuFlags.set(
         MenuFlag::kUsesCursor,
-        MenuFlag::kModal,
+        MenuFlag::kModal,  // REQUIRED: without it the menu beneath steals mouse input
+                           // via the game's device layer (not blockable by the WndProc hook).
         MenuFlag::kAllowSaving,
         MenuFlag::kAdvancesUnderPauseMenu,
         MenuFlag::kRendersUnderPauseMenu);

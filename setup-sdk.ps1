@@ -1,5 +1,5 @@
 # Automatic Ultralight SDK 1.4.0 Setup
-# Run this ONCE before building PrismaUI_F4 New Gen
+# Run this once before building any PrismaUI_F4 runtime target.
 
 $ErrorActionPreference = "Stop"
 
@@ -28,7 +28,7 @@ if (-not (Test-Path $archiveFile)) {
 }
 
 # Check if SDK already extracted
-if (Test-Path "$sdkDir\include" -and Test-Path "$sdkDir\lib" -and Test-Path "$sdkDir\bin") {
+if ((Test-Path "$sdkDir\include") -and (Test-Path "$sdkDir\lib") -and (Test-Path "$sdkDir\bin")) {
     Write-Host "✓ Ultralight SDK 1.4.0 already extracted" -ForegroundColor Green
     Write-Host "  Location: $sdkDir" -ForegroundColor Green
     exit 0

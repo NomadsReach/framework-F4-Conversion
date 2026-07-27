@@ -1,14 +1,14 @@
--- PrismaUI_F4 New Gen / xmake.lua
+-- PrismaUI_F4 / xmake.lua
 --
--- Multi-runtime build supporting both Fallout 4 Original and Next Gen
+-- Runtime-specific build supporting Fallout 4 Original, Next Gen, and VR.
 --
 -- Requirements:
 --   1. CommonLibF4 submodule at lib/commonlibf4 (initialized via git submodule update --recursive)
---   2. Ultralight SDK 1.4.0 auto-extracted to build/ultralight-1.4.0/ by build tools
+--   2. CommonLibF4VR submodule at lib/commonlibf4vr for PRISMA_TARGET=vr
+--   3. Ultralight SDK 1.4.0 auto-extracted to build/ultralight-1.4.0/ by build tools
+--   4. ArthurHub F4VR-CommonFramework path in F4VR_COMMON_FRAMEWORK_PATH for VR
 --
--- Deployment (optional):
---   Set environment variables for auto-deploy:
---   - XSE_FO4_MODS_PATH: MO2 mods folder root (or use build tools config)
+-- PRISMA_TARGET accepts og, ng, or vr and defaults to ng.
 
 set_xmakever("3.0.0")
 set_project("PrismaUI_F4")
@@ -20,13 +20,21 @@ add_rules("mode.release", "mode.releasedbg", "mode.debug")
 -- minhook + DirectXTK from xmake package registry
 add_requires("minhook")
 add_requires("directxtk")
--- spdlog v1.16.0 propagates as public from commonlib-shared; declaring the same
--- version+configs here makes it available for direct inclusion in PCH.h.
-add_requires("spdlog v1.16.0", { configs = { header_only = false, wchar = true, std_format = true } })
 
--- Use CommonLibF4 (supports both OG and NG with single DLL)
--- Multi-runtime capable version
-includes("lib/commonlibf4")
+local PRISMA_TARGET = string.lower(os.getenv("PRISMA_TARGET") or "ng")
+if PRISMA_TARGET ~= "og" and PRISMA_TARGET ~= "ng" and PRISMA_TARGET ~= "vr" then
+    os.raise("PRISMA_TARGET must be one of: og, ng, vr")
+end
+
+if PRISMA_TARGET == "vr" then
+    includes("lib/commonlibf4vr")
+else
+    -- The flat CommonLib target propagates this exact spdlog configuration.
+    add_requires("spdlog v1.16.0", { configs = { header_only = false, wchar = true, std_format = true } })
+    -- CommonLibF4 supports the flat OG and NG runtimes in one DLL.
+    includes("lib/commonlibf4")
+end
+
 -- Ultralight 1.4.0 SDK
 -- Auto-extracted to build/ultralight-1.4.0/ by build tools if missing
 local UL_ROOT      = path.join(os.scriptdir(), "build", "ultralight-1.4.0")
@@ -42,6 +50,9 @@ if not os.isdir(UL_INCLUDE) then
     os.exit(1)
 end
 
+if PRISMA_TARGET == "vr" then
+    includes("ports/fo4vr")
+else
 target("PrismaUI_F4")
     set_kind("shared")
     set_filename("PrismaUI_F4.dll")
@@ -166,3 +177,4 @@ target("PrismaUI-F4-Example-Plugin")
     after_build(function(target)
         print("[PrismaUI-F4-Example] built to: " .. target:targetfile())
     end)
+end

@@ -5,7 +5,7 @@ cls
 color 0A
 echo.
 echo ============================================================================
-echo  PrismaUI_F4 New Gen - Build and Deploy
+echo  PrismaUI_F4 - Build
 echo ============================================================================
 echo.
 
@@ -36,6 +36,55 @@ if not exist "%SCRIPT_DIR%xmake.lua" (
 )
 
 REM ============================================================================
+REM  RUNTIME SELECTION
+REM ============================================================================
+
+:SELECT_RUNTIME
+cls
+color 0A
+echo.
+echo Available runtimes:
+echo   1 - Fallout 4 Original
+echo   2 - Fallout 4 Next Gen
+echo   3 - Fallout 4 VR
+echo.
+set /p "RUNTIME=Enter 1, 2, or 3: "
+
+if "%RUNTIME%"=="1" (
+    set "PRISMA_TARGET=og"
+) else if "%RUNTIME%"=="2" (
+    set "PRISMA_TARGET=ng"
+) else if "%RUNTIME%"=="3" (
+    set "PRISMA_TARGET=vr"
+) else (
+    echo Invalid choice.
+    timeout /t 2 /nobreak
+    goto SELECT_RUNTIME
+)
+
+if /i "%PRISMA_TARGET%"=="vr" (
+    if not defined F4VR_COMMON_FRAMEWORK_PATH (
+        echo.
+        echo Enter the ArthurHub F4VR-CommonFramework checkout path:
+        set /p "F4VR_COMMON_FRAMEWORK_PATH="
+    )
+    if not exist "!F4VR_COMMON_FRAMEWORK_PATH!\external\openvr\openvr.h" (
+        color 0C
+        echo ERROR: ArthurHub CommonFramework OpenVR headers were not found.
+        color 0A
+        pause
+        exit /b 1
+    )
+    if not exist "!F4VR_COMMON_FRAMEWORK_PATH!\external\openvr\openvr_api.lib" (
+        color 0C
+        echo ERROR: ArthurHub CommonFramework OpenVR library was not found.
+        color 0A
+        pause
+        exit /b 1
+    )
+)
+
+REM ============================================================================
 REM  PROJECT SELECTION
 REM ============================================================================
 
@@ -50,12 +99,22 @@ echo.
 set /p "PROJ=Enter 1 or 2: "
 
 if "%PROJ%"=="1" (
-    set "PROJ_NAME=PrismaUI_F4"
-    set "PROJ_TARGET=PrismaUI_F4"
+    if /i "%PRISMA_TARGET%"=="vr" (
+        set "PROJ_NAME=PrismaUI_F4VR"
+        set "PROJ_TARGET=PrismaUI_F4VR"
+    ) else (
+        set "PROJ_NAME=PrismaUI_F4"
+        set "PROJ_TARGET=PrismaUI_F4"
+    )
     set "DLL_NAME=PrismaUI_F4.dll"
 ) else if "%PROJ%"=="2" (
-    set "PROJ_NAME=PrismaUI-F4-Example-Plugin"
-    set "PROJ_TARGET=PrismaUI-F4-Example-Plugin"
+    if /i "%PRISMA_TARGET%"=="vr" (
+        set "PROJ_NAME=PrismaUI-F4VR-Example-Plugin"
+        set "PROJ_TARGET=PrismaUI-F4VR-Example-Plugin"
+    ) else (
+        set "PROJ_NAME=PrismaUI-F4-Example-Plugin"
+        set "PROJ_TARGET=PrismaUI-F4-Example-Plugin"
+    )
     set "DLL_NAME=PrismaUI-F4-Example.dll"
 ) else (
     echo Invalid choice.
@@ -88,7 +147,11 @@ color 0A
 echo.
 echo Configuring...
 cd /d "%SCRIPT_DIR%"
-xmake f --plat=windows --arch=x64 -m release >>"%BUILD_LOG%" 2>&1
+if /i "%PRISMA_TARGET%"=="vr" (
+    xmake f --plat=windows --arch=x64 -m release --fallout_f4=n --fallout_f4ng=n --fallout_f4vr=y --f4se_xbyak=y >>"%BUILD_LOG%" 2>&1
+) else (
+    xmake f --plat=windows --arch=x64 -m release >>"%BUILD_LOG%" 2>&1
+)
 
 if errorlevel 1 (
     color 0C
@@ -99,7 +162,7 @@ if errorlevel 1 (
 )
 
 echo Building %PROJ_TARGET%...
-xmake build -r "%PROJ_TARGET%" >>"%BUILD_LOG%" 2>&1
+xmake build -r -j 2 "%PROJ_TARGET%" >>"%BUILD_LOG%" 2>&1
 
 if errorlevel 1 (
     color 0C
@@ -139,6 +202,12 @@ echo DLL: %DLL_NAME%
 echo Size: %DLL_SIZE% bytes
 echo Found: %DLL_PATH%
 echo.
+
+if /i "%PRISMA_TARGET%"=="vr" (
+    echo FO4VR deployment is disabled.
+    echo The portable distribution was staged under dist\.
+    goto POST_BUILD_MENU
+)
 
 REM ============================================================================
 REM  DEPLOY
@@ -283,6 +352,7 @@ if "%DEPLOY_TYPE%"=="1" (
     echo Location: %MOD_PATH%
 )
 
+:POST_BUILD_MENU
 echo.
 echo.
 echo 1 - Build again
@@ -291,8 +361,8 @@ echo 3 - Exit
 echo.
 set /p "CHOICE="
 
-if "%CHOICE%"=="1" goto SELECT_PROJECT
-if "%CHOICE%"=="2" type "%BUILD_LOG%" && pause && goto SELECT_PROJECT
+if "%CHOICE%"=="1" goto SELECT_RUNTIME
+if "%CHOICE%"=="2" type "%BUILD_LOG%" && pause && goto SELECT_RUNTIME
 if "%CHOICE%"=="3" exit /b 0
 
 endlocal

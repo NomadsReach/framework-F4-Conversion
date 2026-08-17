@@ -24,7 +24,7 @@ namespace PrismaUI::Listeners {
                                          const String& url) {
         logger::info("View [{}]: LoadListener: Finished loading URL: {}", viewId_, url.utf8().data());
         ultralightThread.submit([id = viewId_, urlStr = std::string(url.utf8().data())] {
-            std::shared_lock lock(viewsMutex);
+            std::unique_lock lock(viewsMutex);
             auto it = views.find(id);
             if (it == views.end() || !it->second || it->second->isDestroying.load(std::memory_order_acquire)) {
                 return;
@@ -44,7 +44,7 @@ namespace PrismaUI::Listeners {
         logger::error("View [{}]: LoadListener: Failed loading URL: {}. Error: {}", viewId_, url.utf8().data(),
                       description.utf8().data());
         ultralightThread.submit([id = viewId_] {
-            std::shared_lock lock(viewsMutex);
+            std::unique_lock lock(viewsMutex);
             auto it = views.find(id);
             if (it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire)) {
                 it->second->isLoadingFinished = false;

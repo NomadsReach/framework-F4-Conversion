@@ -1,37 +1,43 @@
-﻿#pragma once
+#pragma once
 
-#include <string>
-#include <vector>
 #include <windows.h>
 
-inline bool isValidUTF8(const char* str)
+#include <cstring>
+#include <limits>
+#include <string>
+
+inline bool isValidUTF8(const char* text)
 {
-    if (!str) {
-        return true;
-    }
-    int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str, -1, NULL, 0);
-    return len != 0;
+    if (!text) return false;
+    const size_t length = std::strlen(text);
+    if (length == 0) return true;
+    if (length > static_cast<size_t>(std::numeric_limits<int>::max())) return false;
+    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, static_cast<int>(length), nullptr, 0) > 0;
 }
 
-inline std::string convertFromANSIToUTF8(const char* str)
+inline std::string convertFromANSIToUTF8(const char* text)
 {
-    if (!str) {
-        return "";
+    if (!text) return {};
+    const size_t length = std::strlen(text);
+    if (length == 0) return {};
+    if (length > static_cast<size_t>(std::numeric_limits<int>::max())) return {};
+
+    const int wideLength = MultiByteToWideChar(CP_ACP, 0, text, static_cast<int>(length), nullptr, 0);
+    if (wideLength <= 0) return {};
+
+    std::wstring wide(static_cast<size_t>(wideLength), L'\0');
+    if (MultiByteToWideChar(CP_ACP, 0, text, static_cast<int>(length), wide.data(), wideLength) != wideLength) {
+        return {};
     }
 
-    int wide_char_len = MultiByteToWideChar(CP_ACP, 0, str, -1, NULL, 0);
-    if (wide_char_len == 0) {
-        return "";  // Conversion failed - return empty rather than invalid encoding
-    }
-    std::vector<wchar_t> wide_char_buffer(wide_char_len);
-    MultiByteToWideChar(CP_ACP, 0, str, -1, wide_char_buffer.data(), wide_char_len);
+    const int utf8Length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), wideLength,
+                                               nullptr, 0, nullptr, nullptr);
+    if (utf8Length <= 0) return {};
 
-    int utf8_len = WideCharToMultiByte(CP_UTF8, 0, wide_char_buffer.data(), -1, NULL, 0, NULL, NULL);
-    if (utf8_len == 0) {
-        return "";  // Conversion failed - return empty rather than invalid encoding
+    std::string utf8(static_cast<size_t>(utf8Length), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), wideLength, utf8.data(), utf8Length,
+                            nullptr, nullptr) != utf8Length) {
+        return {};
     }
-    std::vector<char> utf8_buffer(utf8_len);
-    WideCharToMultiByte(CP_UTF8, 0, wide_char_buffer.data(), -1, utf8_buffer.data(), utf8_len, NULL, NULL);
-
-    return std::string(utf8_buffer.data());
+    return utf8;
 }

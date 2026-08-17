@@ -31,6 +31,7 @@ namespace PrismaUI::Inspector {
 
     // Inspector resource management
     void ReleaseInspectorTexture(Core::PrismaView* viewData);
+    void ClearInspectorBuffers(Core::PrismaView* viewData);
     void DestroyInspectorResources(Core::PrismaView* viewData);
 
     // Inspector utilities

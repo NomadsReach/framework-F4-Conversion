@@ -25,8 +25,18 @@ namespace PrismaUI::ViewOperationQueue {
             return false;
         }
 
+        if (viewData->isDestroying.load(std::memory_order_acquire)) {
+            logger::debug("EnqueueOperation: View [{}] is being destroyed, operation discarded", viewId);
+            return false;
+        }
+
         {
             std::lock_guard lock(viewData->operationMutex);
+
+            if (viewData->isDestroying.load(std::memory_order_acquire)) {
+                logger::debug("EnqueueOperation: View [{}] entered destruction, operation discarded", viewId);
+                return false;
+            }
 
             if (viewData->pendingOperations.size() >= MAX_OPERATIONS_PER_VIEW) {
                 logger::error("EnqueueOperation: Queue overflow for view [{}]. Max size: {}. Operation discarded.",
@@ -54,7 +64,7 @@ namespace PrismaUI::ViewOperationQueue {
             }
         }
 
-        if (!viewData) {
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire)) {
             return;
         }
 
@@ -67,7 +77,7 @@ namespace PrismaUI::ViewOperationQueue {
         OperationFunc operation;
         {
             std::lock_guard lock(viewData->operationMutex);
-            if (viewData->pendingOperations.empty()) {
+            if (viewData->isDestroying.load(std::memory_order_acquire) || viewData->pendingOperations.empty()) {
                 viewData->isProcessingOperation.store(false, std::memory_order_release);
                 return;
             }
@@ -80,14 +90,22 @@ namespace PrismaUI::ViewOperationQueue {
                           viewData->pendingOperations.size());
         }
 
-        ultralightThread.submit([viewId, op = std::move(operation)]() {
+        ultralightThread.submit([viewId, viewData, op = std::move(operation)]() {
             try {
+                if (viewData->isDestroying.load(std::memory_order_acquire)) {
+                    logger::debug("ProcessNextOperation: View [{}] entered destruction before operation execution",
+                                  viewId);
+                    viewData->isProcessingOperation.store(false, std::memory_order_release);
+                    return;
+                }
+
                 {
                     std::shared_lock lock(viewsMutex);
                     auto it = views.find(viewId);
-                    if (it == views.end()) {
+                    if (it == views.end() || it->second.get() != viewData.get()) {
                         logger::warn("ProcessNextOperation: View [{}] was destroyed before operation execution",
                                      viewId);
+                        viewData->isProcessingOperation.store(false, std::memory_order_release);
                         return;
                     }
                 }
@@ -103,18 +121,7 @@ namespace PrismaUI::ViewOperationQueue {
                               viewId);
             }
 
-            std::shared_ptr<PrismaView> vd = nullptr;
-            {
-                std::shared_lock lock(viewsMutex);
-                auto it = views.find(viewId);
-                if (it != views.end()) {
-                    vd = it->second;
-                }
-            }
-
-            if (vd) {
-                vd->isProcessingOperation.store(false, std::memory_order_release);
-            }
+            viewData->isProcessingOperation.store(false, std::memory_order_release);
         });
     }
 
@@ -124,7 +131,9 @@ namespace PrismaUI::ViewOperationQueue {
             std::shared_lock lock(viewsMutex);
             viewIds.reserve(views.size());
             for (const auto& pair : views) {
-                viewIds.push_back(pair.first);
+                if (pair.second && !pair.second->isDestroying.load(std::memory_order_acquire)) {
+                    viewIds.push_back(pair.first);
+                }
             }
         }
 

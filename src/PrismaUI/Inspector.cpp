@@ -17,20 +17,29 @@
 #endif
 
 namespace PrismaUI::Inspector {
-    constexpr uint32_t BYTES_PER_PIXEL = 4;  // BGRA format
+    constexpr uint32_t kBytesPerPixel = 4;
     using namespace Core;
 
     namespace {
-        std::once_flag gInspectorAssetCheckFlag;
-        std::atomic<bool> gInspectorAssetsAvailable{false};
+        std::once_flag inspectorAssetCheckFlag;
+        std::atomic<bool> inspectorAssetsAvailable{false};
+
+        std::shared_ptr<PrismaView> FindLiveView(PrismaViewId viewId) {
+            std::shared_lock lock(viewsMutex);
+            auto it = views.find(viewId);
+            if (it == views.end() || !it->second || it->second->isDestroying.load(std::memory_order_acquire)) {
+                return nullptr;
+            }
+            return it->second;
+        }
     }
 
     void EnsureInspectorAssetsAvailability() {
         const auto inspectorPath = Utils::GetBasePath() / "inspector" / "Main.html";
-        std::call_once(gInspectorAssetCheckFlag, [inspectorPath]() {
+        std::call_once(inspectorAssetCheckFlag, [inspectorPath]() {
             try {
                 if (std::filesystem::exists(inspectorPath)) {
-                    gInspectorAssetsAvailable.store(true);
+                    inspectorAssetsAvailable.store(true);
                     logger::info("Ultralight inspector assets detected at {}", inspectorPath.string());
                 } else {
                     logger::warn(
@@ -47,7 +56,7 @@ namespace PrismaUI::Inspector {
 
     bool AreInspectorAssetsAvailable() {
         EnsureInspectorAssetsAvailability();
-        return gInspectorAssetsAvailable.load();
+        return inspectorAssetsAvailable.load();
     }
 
     void ReleaseInspectorTexture(PrismaView* viewData) {
@@ -59,7 +68,6 @@ namespace PrismaUI::Inspector {
             viewData->inspectorTextureView->Release();
             viewData->inspectorTextureView = nullptr;
         }
-
         if (viewData->inspectorTexture) {
             viewData->inspectorTexture->Release();
             viewData->inspectorTexture = nullptr;
@@ -75,7 +83,6 @@ namespace PrismaUI::Inspector {
         }
 
         ReleaseInspectorTexture(viewData);
-
         {
             std::lock_guard bufferLock(viewData->inspectorBufferMutex);
             viewData->inspectorPixelBuffer.clear();
@@ -98,25 +105,15 @@ namespace PrismaUI::Inspector {
             return;
         }
 
-        std::shared_ptr<PrismaView> viewData = nullptr;
-        {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewData = it->second;
-            }
-        }
-
+        auto viewData = FindLiveView(viewId);
         if (!viewData) {
             logger::warn("CreateInspectorView: View ID [{}] not found.", viewId);
             return;
         }
-
         if (viewData->inspectorView) {
             logger::info("View [{}]: Inspector view already exists.", viewId);
             return;
         }
-
         if (!viewData->ultralightView) {
             logger::warn("View [{}]: Cannot create inspector because Ultralight view is not ready yet.", viewId);
             return;
@@ -124,7 +121,7 @@ namespace PrismaUI::Inspector {
 
         try {
             auto createInspector = [view = viewData]() {
-                if (view->ultralightView) {
+                if (!view->isDestroying.load(std::memory_order_acquire) && view->ultralightView) {
                     view->ultralightView->CreateLocalInspectorView();
                 }
             };
@@ -132,9 +129,7 @@ namespace PrismaUI::Inspector {
             if (ultralightThread.IsWorkerThread()) {
                 createInspector();
             } else {
-                auto future =
-                    ultralightThread.submit_with_priority(SingleThreadExecutor::Priority::MEDIUM, createInspector);
-                future.get();
+                ultralightThread.submit_with_priority(SingleThreadExecutor::Priority::MEDIUM, createInspector).get();
             }
             logger::info("View [{}]: Inspector creation requested.", viewId);
         } catch (const std::exception& e) {
@@ -143,15 +138,7 @@ namespace PrismaUI::Inspector {
     }
 
     void SetInspectorVisibility(const PrismaViewId& viewId, bool visible) {
-        std::shared_ptr<PrismaView> viewData = nullptr;
-        {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewData = it->second;
-            }
-        }
-
+        auto viewData = FindLiveView(viewId);
         if (!viewData) {
             logger::warn("SetInspectorVisibility: View ID [{}] not found.", viewId);
             return;
@@ -160,8 +147,7 @@ namespace PrismaUI::Inspector {
         if (!viewData->inspectorView && visible) {
             CreateInspectorView(viewId);
         }
-
-        if (!viewData->inspectorView) {
+        if (viewData->isDestroying.load(std::memory_order_acquire) || !viewData->inspectorView) {
             logger::warn("View [{}]: Inspector view is not available to {}.", viewId, visible ? "show" : "hide");
             return;
         }
@@ -169,8 +155,11 @@ namespace PrismaUI::Inspector {
         viewData->inspectorVisible.store(visible);
         viewData->inspectorPointerHover.store(false);
 
-        if (visible && viewData->inspectorView) {
+        if (visible) {
             auto focusInspector = [view = viewData]() {
+                if (view->isDestroying.load(std::memory_order_acquire)) {
+                    return;
+                }
                 if (view->inspectorView) {
                     view->inspectorView->Focus();
                 }
@@ -182,9 +171,7 @@ namespace PrismaUI::Inspector {
             if (ultralightThread.IsWorkerThread()) {
                 focusInspector();
             } else {
-                auto future =
-                    ultralightThread.submit_with_priority(SingleThreadExecutor::Priority::MEDIUM, focusInspector);
-                future.wait();
+                ultralightThread.submit_with_priority(SingleThreadExecutor::Priority::MEDIUM, focusInspector).wait();
             }
         }
 
@@ -192,12 +179,8 @@ namespace PrismaUI::Inspector {
     }
 
     bool IsInspectorVisible(const PrismaViewId& viewId) {
-        std::shared_lock lock(viewsMutex);
-        auto it = views.find(viewId);
-        if (it != views.end() && it->second) {
-            return it->second->inspectorVisible.load();
-        }
-        return false;
+        auto viewData = FindLiveView(viewId);
+        return viewData && viewData->inspectorVisible.load();
     }
 
     void SetInspectorBounds(const PrismaViewId& viewId, float topLeftX, float topLeftY, uint32_t width,
@@ -205,29 +188,20 @@ namespace PrismaUI::Inspector {
         width = std::max<uint32_t>(width, 32u);
         height = std::max<uint32_t>(height, 32u);
 
-        std::shared_ptr<PrismaView> viewData = nullptr;
-        {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewData = it->second;
-            }
-        }
-
+        auto viewData = FindLiveView(viewId);
         if (!viewData) {
             logger::warn("SetInspectorBounds: View ID [{}] not found.", viewId);
             return;
         }
-
         if (!viewData->inspectorView) {
             logger::warn("View [{}]: Cannot set inspector bounds because inspector is not available.", viewId);
             return;
         }
 
-        const float screenW = static_cast<float>(screenSize.width ? screenSize.width : width);
-        const float screenH = static_cast<float>(screenSize.height ? screenSize.height : height);
-        const float maxX = std::max(0.0f, screenW - static_cast<float>(width));
-        const float maxY = std::max(0.0f, screenH - static_cast<float>(height));
+        const float screenWidth = static_cast<float>(screenSize.width ? screenSize.width : width);
+        const float screenHeight = static_cast<float>(screenSize.height ? screenSize.height : height);
+        const float maxX = std::max(0.0f, screenWidth - static_cast<float>(width));
+        const float maxY = std::max(0.0f, screenHeight - static_cast<float>(height));
 
         viewData->inspectorPosX = std::clamp(topLeftX, 0.0f, maxX);
         viewData->inspectorPosY = std::clamp(topLeftY, 0.0f, maxY);
@@ -237,7 +211,7 @@ namespace PrismaUI::Inspector {
 
         try {
             auto resizeInspector = [view = viewData, width, height]() {
-                if (view->inspectorView) {
+                if (!view->isDestroying.load(std::memory_order_acquire) && view->inspectorView) {
                     view->inspectorView->Resize(width, height);
                 }
             };
@@ -245,9 +219,7 @@ namespace PrismaUI::Inspector {
             if (ultralightThread.IsWorkerThread()) {
                 resizeInspector();
             } else {
-                auto future =
-                    ultralightThread.submit_with_priority(SingleThreadExecutor::Priority::MEDIUM, resizeInspector);
-                future.wait();
+                ultralightThread.submit_with_priority(SingleThreadExecutor::Priority::MEDIUM, resizeInspector).wait();
             }
             logger::info("View [{}]: Inspector bounds set to ({}, {}) with size {}x{}", viewId, topLeftX, topLeftY,
                          width, height);
@@ -256,21 +228,19 @@ namespace PrismaUI::Inspector {
         }
     }
 
-    // ========== Rendering Pipeline ==========
-
     void RenderInspectorView(std::shared_ptr<PrismaView> viewData) {
-        if (!viewData || !viewData->inspectorView || !viewData->inspectorVisible.load() || viewData->isHidden.load()) {
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) || !viewData->inspectorView ||
+            !viewData->inspectorVisible.load() || viewData->isHidden.load()) {
             return;
         }
 
-        Surface* surface = viewData->inspectorView->surface();
-        if (surface) {
+        if (viewData->inspectorView->surface()) {
             CopyInspectorBitmapToBuffer(viewData);
         }
     }
 
     void CopyInspectorBitmapToBuffer(std::shared_ptr<PrismaView> viewData) {
-        if (!viewData || !viewData->inspectorView) {
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) || !viewData->inspectorView) {
             return;
         }
 
@@ -279,9 +249,8 @@ namespace PrismaUI::Inspector {
             return;
         }
 
-        // Safe to cast: we use the default BitmapSurfaceFactory, so surface is always a BitmapSurface
-        BitmapSurface* bitmapSurface = static_cast<BitmapSurface*>(surface);
-
+        // The default BitmapSurfaceFactory guarantees a BitmapSurface here.
+        auto* bitmapSurface = static_cast<BitmapSurface*>(surface);
         RefPtr<Bitmap> bitmap = bitmapSurface->bitmap();
         if (!bitmap || bitmap->IsEmpty()) {
             return;
@@ -289,7 +258,6 @@ namespace PrismaUI::Inspector {
 
         const void* pixels = bitmap->LockPixels();
         if (!pixels) {
-            bitmap->UnlockPixels();
             return;
         }
 
@@ -300,13 +268,10 @@ namespace PrismaUI::Inspector {
 
         {
             std::lock_guard<std::mutex> lock(viewData->inspectorBufferMutex);
-
             if (viewData->inspectorPixelBuffer.size() != dataSize) {
                 viewData->inspectorPixelBuffer.resize(dataSize);
             }
-
             std::memcpy(viewData->inspectorPixelBuffer.data(), pixels, dataSize);
-
             viewData->inspectorBufferWidth = width;
             viewData->inspectorBufferHeight = height;
             viewData->inspectorBufferStride = stride;
@@ -318,54 +283,43 @@ namespace PrismaUI::Inspector {
 
     void CopyInspectorPixelsToTexture(PrismaView* viewData, void* pixels, uint32_t width, uint32_t height,
                                       uint32_t stride) {
-        if (!viewData || !pixels || !d3dContext || !d3dDevice) {
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) || !pixels || !d3dContext ||
+            !d3dDevice || width == 0 || height == 0) {
             return;
         }
 
-        if (width == 0 || height == 0) {
-            return;
-        }
-
-        // Recreate texture if size changed
         if (!viewData->inspectorTexture || viewData->inspectorTextureWidth != width ||
             viewData->inspectorTextureHeight != height) {
-            if (viewData->inspectorTextureView) {
-                viewData->inspectorTextureView->Release();
-                viewData->inspectorTextureView = nullptr;
-            }
-            if (viewData->inspectorTexture) {
-                viewData->inspectorTexture->Release();
-                viewData->inspectorTexture = nullptr;
-            }
+            ReleaseInspectorTexture(viewData);
 
-            D3D11_TEXTURE2D_DESC texDesc = {};
-            texDesc.Width = width;
-            texDesc.Height = height;
-            texDesc.MipLevels = 1;
-            texDesc.ArraySize = 1;
-            texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-            texDesc.SampleDesc.Count = 1;
-            texDesc.Usage = D3D11_USAGE_DYNAMIC;
-            texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            texDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            D3D11_TEXTURE2D_DESC textureDesc = {};
+            textureDesc.Width = width;
+            textureDesc.Height = height;
+            textureDesc.MipLevels = 1;
+            textureDesc.ArraySize = 1;
+            textureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            textureDesc.SampleDesc.Count = 1;
+            textureDesc.Usage = D3D11_USAGE_DYNAMIC;
+            textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            textureDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
-            HRESULT hr = d3dDevice->CreateTexture2D(&texDesc, nullptr, &viewData->inspectorTexture);
-            if (FAILED(hr)) {
+            HRESULT result = d3dDevice->CreateTexture2D(&textureDesc, nullptr, &viewData->inspectorTexture);
+            if (FAILED(result)) {
                 logger::error("Failed to create inspector D3D11 texture for View [{}]: HRESULT={:X}", viewData->id,
-                              static_cast<unsigned>(hr));
+                              static_cast<unsigned>(result));
                 return;
             }
 
-            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-            srvDesc.Format = texDesc.Format;
-            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-            srvDesc.Texture2D.MipLevels = 1;
+            D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc = {};
+            viewDesc.Format = textureDesc.Format;
+            viewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            viewDesc.Texture2D.MipLevels = 1;
 
-            hr = d3dDevice->CreateShaderResourceView(viewData->inspectorTexture, &srvDesc,
-                                                     &viewData->inspectorTextureView);
-            if (FAILED(hr)) {
+            result = d3dDevice->CreateShaderResourceView(viewData->inspectorTexture, &viewDesc,
+                                                         &viewData->inspectorTextureView);
+            if (FAILED(result)) {
                 logger::error("Failed to create inspector shader resource view for View [{}]: HRESULT={:X}",
-                              viewData->id, static_cast<unsigned>(hr));
+                              viewData->id, static_cast<unsigned>(result));
                 viewData->inspectorTexture->Release();
                 viewData->inspectorTexture = nullptr;
                 return;
@@ -375,21 +329,19 @@ namespace PrismaUI::Inspector {
             viewData->inspectorTextureHeight = height;
         }
 
-        // Upload pixels to texture
-        D3D11_MAPPED_SUBRESOURCE mapped;
-        HRESULT hr = d3dContext->Map(viewData->inspectorTexture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-        if (SUCCEEDED(hr)) {
-            const uint8_t* src = static_cast<const uint8_t*>(pixels);
-            uint8_t* dst = static_cast<uint8_t*>(mapped.pData);
-
-            for (uint32_t row = 0; row < height; ++row) {
-                std::memcpy(dst + row * mapped.RowPitch, src + row * stride, width * BYTES_PER_PIXEL);
-            }
-
-            d3dContext->Unmap(viewData->inspectorTexture, 0);
-        } else {
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        HRESULT result = d3dContext->Map(viewData->inspectorTexture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+        if (FAILED(result)) {
             logger::error("Failed to map inspector texture for View [{}]: HRESULT={:X}", viewData->id,
-                          static_cast<unsigned>(hr));
+                          static_cast<unsigned>(result));
+            return;
         }
+
+        const uint8_t* source = static_cast<const uint8_t*>(pixels);
+        auto* destination = static_cast<uint8_t*>(mapped.pData);
+        for (uint32_t row = 0; row < height; ++row) {
+            std::memcpy(destination + row * mapped.RowPitch, source + row * stride, width * kBytesPerPixel);
+        }
+        d3dContext->Unmap(viewData->inspectorTexture, 0);
     }
-}  // namespace PrismaUI::Inspector
+}

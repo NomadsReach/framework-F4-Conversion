@@ -1,5 +1,7 @@
 ﻿#include "ViewManager.h"
 
+#include <unordered_set>
+
 #include "Core.h"
 #include "InputHandler.h"
 #include "Inspector.h"
@@ -9,15 +11,36 @@
 namespace PrismaUI::ViewManager {
     using namespace Core;
 
+    static std::mutex issuedViewIdsMutex;
+    static std::unordered_set<Core::PrismaViewId> issuedViewIds;
+
     static std::shared_ptr<PrismaView> FindView(const Core::PrismaViewId& viewId) {
         std::shared_lock lock(viewsMutex);
         auto it = views.find(viewId);
         return it != views.end() ? it->second : nullptr;
     }
 
+    static std::shared_ptr<PrismaView> FindLiveView(const Core::PrismaViewId& viewId) {
+        auto viewData = FindView(viewId);
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire)) {
+            return nullptr;
+        }
+        return viewData;
+    }
+
+    static Core::PrismaViewId GenerateViewId() {
+        std::lock_guard lock(issuedViewIdsMutex);
+        while (true) {
+            const auto viewId = generator.generate();
+            if (viewId != 0 && issuedViewIds.insert(viewId).second) {
+                return viewId;
+            }
+        }
+    }
+
     Core::PrismaViewId Create(const std::string& htmlPath, std::function<void(Core::PrismaViewId)> onDomReadyCallback) {
-        bool expected_init = false;
-        if (coreInitialized.compare_exchange_strong(expected_init, true)) {
+        bool expectedInit = false;
+        if (coreInitialized.compare_exchange_strong(expectedInit, true)) {
             Core::InitializeCoreSystem();
             if (!renderer) {
                 coreInitialized = false;
@@ -29,7 +52,6 @@ namespace PrismaUI::ViewManager {
             throw std::runtime_error("PrismaUI Core Renderer is unexpectedly null.");
         }
 
-        Core::PrismaViewId newViewId = generator.generate();
         if (htmlPath.substr(0, 7) == "http://" || htmlPath.substr(0, 8) == "https://") {
             logger::error("[PrismaUI Security] CreateView blocked: external URL '{}' is not permitted. "
                           "Only local file paths relative to Data/PrismaUI_F4/views/ are allowed.",
@@ -37,6 +59,7 @@ namespace PrismaUI::ViewManager {
             return 0;
         }
 
+        const Core::PrismaViewId newViewId = GenerateViewId();
         std::string fileUrl = "file:///views/" + htmlPath;
         auto viewData = std::make_shared<Core::PrismaView>();
         viewData->id = newViewId;
@@ -44,22 +67,18 @@ namespace PrismaUI::ViewManager {
         viewData->htmlPathToLoad = fileUrl;
         viewData->originalUrl = fileUrl;
         viewData->isHidden = false;
-        viewData->domReadyCallback = onDomReadyCallback;
+        viewData->domReadyCallback = std::move(onDomReadyCallback);
 
         {
             std::unique_lock lock(viewsMutex);
             int maxOrder = -1;
-            if (views.empty()) {
-                viewData->order = 0;
-            } else {
-                for (const auto& pair : views) {
-                    if (pair.second->order > maxOrder) {
-                        maxOrder = pair.second->order;
-                    }
+            for (const auto& pair : views) {
+                if (pair.second && pair.second->order > maxOrder) {
+                    maxOrder = pair.second->order;
                 }
-                viewData->order = maxOrder + 1;
             }
-            views[newViewId] = viewData;
+            viewData->order = maxOrder + 1;
+            views.emplace(newViewId, viewData);
         }
 
         logger::info(
@@ -93,18 +112,18 @@ namespace PrismaUI::ViewManager {
         }
 
         if (auto controlMap = RE::ControlMap::GetSingleton()) {
-            controlMap->SetIgnoreKeyboardMouse(false);
+            controlMap->SetIgnoreKeyboardMouse(PrismaUI::InputHandler::IsAnyInputCaptureActive());
         }
     }
 
     void Show(const Core::PrismaViewId& viewId) {
-        if (!ViewManager::IsValid(viewId)) {
+        if (!IsValid(viewId)) {
             logger::warn("Show: View ID [{}] not found.", viewId);
             return;
         }
 
         ViewOperationQueue::EnqueueOperation(viewId, [viewId]() {
-            auto viewData = FindView(viewId);
+            auto viewData = FindLiveView(viewId);
             if (!viewData) {
                 return;
             }
@@ -118,13 +137,13 @@ namespace PrismaUI::ViewManager {
     }
 
     void Hide(const Core::PrismaViewId& viewId) {
-        if (!ViewManager::IsValid(viewId)) {
+        if (!IsValid(viewId)) {
             logger::warn("Hide: View ID [{}] not found.", viewId);
             return;
         }
 
         ViewOperationQueue::EnqueueOperation(viewId, [viewId]() {
-            auto viewData = FindView(viewId);
+            auto viewData = FindLiveView(viewId);
             if (!viewData) {
                 return;
             }
@@ -141,7 +160,7 @@ namespace PrismaUI::ViewManager {
     }
 
     bool IsHidden(const Core::PrismaViewId& viewId) {
-        auto viewData = FindView(viewId);
+        auto viewData = FindLiveView(viewId);
         if (viewData) {
             return viewData->isHidden.load();
         }
@@ -151,17 +170,18 @@ namespace PrismaUI::ViewManager {
 
     bool IsValid(const Core::PrismaViewId& viewId) {
         std::shared_lock lock(viewsMutex);
-        return views.find(viewId) != views.end();
+        auto it = views.find(viewId);
+        return it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire);
     }
 
     bool Focus(const Core::PrismaViewId& viewId, bool pauseGame, bool disableFocusMenu) {
-        if (!ViewManager::IsValid(viewId)) {
+        if (!IsValid(viewId)) {
             logger::warn("Focus: View ID [{}] not found.", viewId);
             return false;
         }
 
         return ViewOperationQueue::EnqueueOperation(viewId, [viewId, pauseGame, disableFocusMenu]() {
-            auto viewData = FindView(viewId);
+            auto viewData = FindLiveView(viewId);
             if (!viewData || !viewData->ultralightView) {
                 logger::warn("Focus: View [{}] or its Ultralight View is not ready.", viewId);
                 return;
@@ -179,7 +199,9 @@ namespace PrismaUI::ViewManager {
             {
                 std::shared_lock lock(viewsMutex);
                 for (const auto& pair : views) {
-                    if (pair.first != viewId && pair.second->ultralightView && pair.second->ultralightView->HasFocus()) {
+                    if (pair.first != viewId && pair.second &&
+                        !pair.second->isDestroying.load(std::memory_order_acquire) && pair.second->ultralightView &&
+                        pair.second->ultralightView->HasFocus()) {
                         viewsToUnfocus.push_back(pair.first);
                     }
                 }
@@ -187,7 +209,7 @@ namespace PrismaUI::ViewManager {
 
             for (const auto idToUnfocus : viewsToUnfocus) {
                 ViewOperationQueue::EnqueueOperation(idToUnfocus, [idToUnfocus]() {
-                    auto otherView = FindView(idToUnfocus);
+                    auto otherView = FindLiveView(idToUnfocus);
                     if (otherView && otherView->ultralightView) {
                         PerformUnfocusOperations(idToUnfocus, otherView, false);
                         logger::debug("Unfocus: View [{}] unfocused (focus switching).", idToUnfocus);
@@ -218,34 +240,30 @@ namespace PrismaUI::ViewManager {
     }
 
     void Unfocus(const Core::PrismaViewId& viewId) {
-        if (!ViewManager::IsValid(viewId)) {
+        if (!IsValid(viewId)) {
             logger::warn("Unfocus: View ID [{}] not found.", viewId);
             return;
         }
 
         ViewOperationQueue::EnqueueOperation(viewId, [viewId]() {
-            auto viewData = FindView(viewId);
+            auto viewData = FindLiveView(viewId);
             if (!viewData) {
-                logger::warn("Unfocus: View [{}] not found during operation execution.", viewId);
-                PrismaUI::InputHandler::DisableInputCapture(0);
-                FocusMenu::Close();
                 return;
             }
-
             PerformUnfocusOperations(viewId, viewData);
             logger::debug("Unfocus: View [{}] unfocused successfully.", viewId);
         });
     }
 
     bool HasFocus(const Core::PrismaViewId& viewId) {
-        auto viewData = FindView(viewId);
+        auto viewData = FindLiveView(viewId);
         if (!viewData) {
             logger::warn("HasFocus: View ID [{}] not found.", viewId);
             return false;
         }
 
-        auto checkFocus = [view_ptr = viewData->ultralightView]() -> bool {
-            return view_ptr ? view_ptr->HasFocus() : false;
+        auto checkFocus = [viewPtr = viewData->ultralightView]() -> bool {
+            return viewPtr ? viewPtr->HasFocus() : false;
         };
 
         try {
@@ -260,13 +278,13 @@ namespace PrismaUI::ViewManager {
     }
 
     bool ViewHasInputFocus(const Core::PrismaViewId& viewId) {
-        auto viewData = FindView(viewId);
+        auto viewData = FindLiveView(viewId);
         if (!viewData || !viewData->ultralightView) {
             return false;
         }
 
-        auto checkFocus = [view_ptr = viewData->ultralightView]() -> bool {
-            return view_ptr ? view_ptr->HasInputFocus() : false;
+        auto checkFocus = [viewPtr = viewData->ultralightView]() -> bool {
+            return viewPtr ? viewPtr->HasInputFocus() : false;
         };
 
         try {
@@ -283,24 +301,25 @@ namespace PrismaUI::ViewManager {
     void SetScrollingPixelSize(const Core::PrismaViewId& viewId, int pixelSize) {
         std::unique_lock lock(viewsMutex);
         auto it = views.find(viewId);
-        if (it != views.end()) {
-            if (pixelSize <= 0) {
-                logger::warn("SetScrollingPixelSize: Invalid pixel size {} for view [{}]. Must be > 0. Using default.",
-                             pixelSize, viewId);
-                it->second->scrollingPixelSize = 16;
-            } else {
-                it->second->scrollingPixelSize = pixelSize;
-                logger::debug("SetScrollingPixelSize: Set {} pixels per scroll line for view [{}]", pixelSize, viewId);
-            }
-        } else {
+        if (it == views.end() || !it->second || it->second->isDestroying.load(std::memory_order_acquire)) {
             logger::warn("SetScrollingPixelSize: View ID [{}] not found.", viewId);
+            return;
+        }
+
+        if (pixelSize <= 0) {
+            logger::warn("SetScrollingPixelSize: Invalid pixel size {} for view [{}]. Must be > 0. Using default.",
+                         pixelSize, viewId);
+            it->second->scrollingPixelSize = 16;
+        } else {
+            it->second->scrollingPixelSize = pixelSize;
+            logger::debug("SetScrollingPixelSize: Set {} pixels per scroll line for view [{}]", pixelSize, viewId);
         }
     }
 
     int GetScrollingPixelSize(const Core::PrismaViewId& viewId) {
         std::shared_lock lock(viewsMutex);
         auto it = views.find(viewId);
-        if (it != views.end()) {
+        if (it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire)) {
             return it->second->scrollingPixelSize;
         }
         logger::warn("GetScrollingPixelSize: View ID [{}] not found, returning default.", viewId);
@@ -347,7 +366,7 @@ namespace PrismaUI::ViewManager {
             PrismaUI::InputHandler::DisableInputCapture(viewId);
             FocusMenu::Close();
             if (auto controlMap = RE::ControlMap::GetSingleton()) {
-                controlMap->SetIgnoreKeyboardMouse(false);
+                controlMap->SetIgnoreKeyboardMouse(PrismaUI::InputHandler::IsAnyInputCaptureActive());
             }
         }
 
@@ -448,7 +467,7 @@ namespace PrismaUI::ViewManager {
     void SetOrder(const Core::PrismaViewId& viewId, int order) {
         std::unique_lock lock(viewsMutex);
         auto it = views.find(viewId);
-        if (it != views.end()) {
+        if (it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire)) {
             it->second->order = order;
             logger::debug("SetOrder: Set order {} for view [{}]", order, viewId);
         } else {
@@ -459,7 +478,7 @@ namespace PrismaUI::ViewManager {
     int GetOrder(const Core::PrismaViewId& viewId) {
         std::shared_lock lock(viewsMutex);
         auto it = views.find(viewId);
-        if (it != views.end()) {
+        if (it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire)) {
             return it->second->order;
         }
         logger::warn("GetOrder: View ID [{}] not found, returning -1.", viewId);
@@ -467,20 +486,26 @@ namespace PrismaUI::ViewManager {
     }
 
     void CreateInspectorView(const Core::PrismaViewId& viewId) {
-        Inspector::CreateInspectorView(viewId);
+        if (IsValid(viewId)) {
+            Inspector::CreateInspectorView(viewId);
+        }
     }
 
     void SetInspectorVisibility(const Core::PrismaViewId& viewId, bool visible) {
-        Inspector::SetInspectorVisibility(viewId, visible);
+        if (IsValid(viewId)) {
+            Inspector::SetInspectorVisibility(viewId, visible);
+        }
     }
 
     bool IsInspectorVisible(const Core::PrismaViewId& viewId) {
-        return Inspector::IsInspectorVisible(viewId);
+        return IsValid(viewId) && Inspector::IsInspectorVisible(viewId);
     }
 
     void SetInspectorBounds(const Core::PrismaViewId& viewId, float topLeftX, float topLeftY, uint32_t width,
                             uint32_t height) {
-        Inspector::SetInspectorBounds(viewId, topLeftX, topLeftY, width, height);
+        if (IsValid(viewId)) {
+            Inspector::SetInspectorBounds(viewId, topLeftX, topLeftY, width, height);
+        }
     }
 
     bool HasAnyActiveFocus() {
@@ -488,7 +513,8 @@ namespace PrismaUI::ViewManager {
         {
             std::shared_lock lock(viewsMutex);
             for (const auto& pair : views) {
-                if (pair.second && pair.second->ultralightView) {
+                if (pair.second && !pair.second->isDestroying.load(std::memory_order_acquire) &&
+                    pair.second->ultralightView) {
                     viewPtrs.push_back(pair.second->ultralightView);
                 }
             }
@@ -499,8 +525,8 @@ namespace PrismaUI::ViewManager {
         }
 
         auto checkFocus = [viewPtrs = std::move(viewPtrs)]() -> bool {
-            for (const auto& view_ptr : viewPtrs) {
-                if (view_ptr && view_ptr->HasFocus()) {
+            for (const auto& viewPtr : viewPtrs) {
+                if (viewPtr && viewPtr->HasFocus()) {
                     return true;
                 }
             }
@@ -523,7 +549,7 @@ namespace PrismaUI::ViewManager {
         std::function<void(Core::PrismaViewId, PRISMA_UI_API::ConsoleMessageLevel, const std::string&)> callback) {
         std::unique_lock lock(viewsMutex);
         auto it = views.find(viewId);
-        if (it != views.end() && it->second) {
+        if (it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire)) {
             it->second->consoleMessageCallback = std::move(callback);
         } else {
             logger::warn("RegisterConsoleCallback: View ID [{}] not found.", viewId);
@@ -533,7 +559,7 @@ namespace PrismaUI::ViewManager {
     void RegisterTranslations(const Core::PrismaViewId& viewId, const std::string& pluginName) {
         std::unique_lock lock(viewsMutex);
         auto it = views.find(viewId);
-        if (it != views.end() && it->second) {
+        if (it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire)) {
             it->second->translationPluginName = pluginName;
             logger::info("RegisterTranslations: View [{}] registered translations for '{}'", viewId, pluginName);
         } else {
@@ -551,7 +577,7 @@ namespace PrismaUI::ViewManager {
             std::shared_lock lock(viewsMutex);
             snapshot.reserve(views.size());
             for (const auto& [id, viewData] : views) {
-                if (!viewData) {
+                if (!viewData || viewData->isDestroying.load(std::memory_order_acquire)) {
                     continue;
                 }
                 std::string path = viewData->originalUrl;

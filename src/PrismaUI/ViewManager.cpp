@@ -4,6 +4,7 @@
 #include "InputHandler.h"
 #include "Inspector.h"
 #include "Listeners.h"
+#include "RenderRetirement.h"
 #include "ViewOperationQueue.h"
 
 namespace PrismaUI::ViewManager {
@@ -466,7 +467,8 @@ namespace PrismaUI::ViewManager {
                     logger::debug("Destroy: Releasing inspector view for View [{}]", viewId);
                     viewData->inspectorView = nullptr;
                 }
-                Inspector::DestroyInspectorResources(viewData.get());
+                // D3D inspector resources are retired later on the Present thread.
+                Inspector::ClearInspectorBuffers(viewData.get());
 
                 if (viewData->ultralightView) {
                     logger::debug("Destroy: Detaching listeners for View [{}]", viewId);
@@ -550,32 +552,11 @@ namespace PrismaUI::ViewManager {
             }
         }
 
-        bool hasD3DResources = (viewDataToDestroy->texture != nullptr || viewDataToDestroy->textureView != nullptr);
-
-        if (hasD3DResources) {
-            logger::debug("Destroy: D3D resources present for View [{}], forcing manual cleanup", viewId);
-
-            if (viewDataToDestroy->textureView) {
-                logger::debug("Destroy: Releasing textureView for View [{}]", viewId);
-                viewDataToDestroy->textureView->Release();
-                viewDataToDestroy->textureView = nullptr;
-            }
-
-            if (viewDataToDestroy->texture) {
-                logger::debug("Destroy: Releasing texture for View [{}]", viewId);
-                viewDataToDestroy->texture->Release();
-                viewDataToDestroy->texture = nullptr;
-            }
-
-            viewDataToDestroy->textureWidth = 0;
-            viewDataToDestroy->textureHeight = 0;
-
-            logger::debug("Destroy: D3D resources released for View [{}]", viewId);
-        } else {
-            logger::debug("Destroy: No D3D resources to release for View [{}]", viewId);
-        }
-
-        viewDataToDestroy->pendingResourceRelease = false;
+        // Preserve the shared view object until the next Present-thread drain. A frame that
+        // snapshotted this view before isDestroying was set can finish using its SRV safely.
+        viewDataToDestroy->pendingResourceRelease.store(true, std::memory_order_release);
+        RenderRetirement::Enqueue(viewDataToDestroy);
+        logger::debug("Destroy: Queued D3D resources for Present-thread retirement for View [{}]", viewId);
 
         logger::info("Destroy: View [{}] successfully destroyed", viewId);
     }

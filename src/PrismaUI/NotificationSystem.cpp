@@ -1,113 +1,168 @@
 #include "NotificationSystem.h"
 
+#include <deque>
+#include <mutex>
+#include <vector>
+
 #include "Communication.h"
 #include "ViewManager.h"
-#include "../API/API.h"
-#include "../PCH.h"
 
 namespace PrismaUI::NotificationSystem {
-    static std::atomic<Core::PrismaViewId> g_notificationViewId = 0;
-    static std::atomic<bool> g_notificationInitialized = false;
+namespace {
 
-    static auto EscapeJS(const std::string& s) -> std::string {
-        std::string escaped;
-        for (char c : s) {
-            if (c == '\'') escaped += "\\'";
-            else if (c == '\\') escaped += "\\\\";
-            else if (c == '\n') escaped += "\\n";
-            else escaped += c;
+struct Notification {
+    std::string title;
+    std::string message;
+    uint32_t duration = 0;
+    std::string color;
+};
+
+constexpr size_t kMaxPending = 64;
+std::mutex g_mutex;
+Core::PrismaViewId g_viewId = 0;
+bool g_creating = false;
+bool g_ready = false;
+std::deque<Notification> g_pending;
+
+std::string EscapeJs(const std::string& value)
+{
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string output;
+    output.reserve(value.size() + 8);
+
+    for (size_t i = 0; i < value.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(value[i]);
+        if (i + 2 < value.size() && c == 0xE2 && static_cast<unsigned char>(value[i + 1]) == 0x80 &&
+            (static_cast<unsigned char>(value[i + 2]) == 0xA8 || static_cast<unsigned char>(value[i + 2]) == 0xA9)) {
+            output += static_cast<unsigned char>(value[i + 2]) == 0xA8 ? "\\u2028" : "\\u2029";
+            i += 2;
+            continue;
         }
-        return escaped;
-    }
 
-    Core::PrismaViewId ShowNotification(const std::string& title, const std::string& message,
-                                        uint32_t duration, const std::string& color) {
-        logger::info("[NotificationSystem::ShowNotification] Attempting to show: '{}' | '{}'", title, message);
-
-        // Create the notification view if not already created
-        if (!g_notificationInitialized) {
-            logger::info("[NotificationSystem] Initializing notification view...");
-
-            auto api = PluginAPI::PrismaUIInterface::GetSingleton();
-            if (!api) {
-                logger::critical("[NotificationSystem] PrismaUI API not available - this is a critical error!");
-                logger::critical("[NotificationSystem] Make sure PrismaUI_F4.dll is loaded and initialized");
-                return 0;
-            }
-
-            logger::info("[NotificationSystem] API available, creating view...");
-
-            try {
-                Core::PrismaViewId notifId = ViewManager::Create(
-                    "notification-banner.html",
-                    [](Core::PrismaViewId viewId) {
-                        logger::info("[NotificationSystem] Notification view DOM ready, ID: {}", viewId);
-                        g_notificationViewId = viewId;
-                        g_notificationInitialized = true;
-                    });
-
-                if (notifId == 0) {
-                    logger::error("[NotificationSystem] ViewManager::Create returned 0");
-                    return 0;
+        switch (c) {
+            case '\'': output += "\\'"; break;
+            case '\\': output += "\\\\"; break;
+            case '\n': output += "\\n"; break;
+            case '\r': output += "\\r"; break;
+            case '\t': output += "\\t"; break;
+            case '\b': output += "\\b"; break;
+            case '\f': output += "\\f"; break;
+            default:
+                if (c < 0x20) {
+                    output += "\\x";
+                    output.push_back(hex[(c >> 4) & 0xF]);
+                    output.push_back(hex[c & 0xF]);
+                } else {
+                    output.push_back(static_cast<char>(c));
                 }
+                break;
+        }
+    }
+    return output;
+}
 
-                logger::info("[NotificationSystem] View created with ID: {}, showing...", notifId);
-                api->Show(notifId);
-                logger::info("[NotificationSystem] Notification view shown");
-            } catch (const std::exception& e) {
-                logger::error("[NotificationSystem] Exception during initialization: {}", e.what());
-                return 0;
+void InvokeNotification(Core::PrismaViewId viewId, const Notification& notification)
+{
+    if (!ViewManager::IsValid(viewId)) return;
+
+    std::string script = "window.showNotification&&window.showNotification('";
+    script += EscapeJs(notification.title);
+    script += "','";
+    script += EscapeJs(notification.message);
+    script += "',";
+    script += std::to_string(notification.duration);
+    script += ",'";
+    script += EscapeJs(notification.color);
+    script += "')";
+    Communication::Invoke(viewId, ultralight::String(script.c_str()), nullptr);
+}
+
+void OnReady(Core::PrismaViewId viewId)
+{
+    std::vector<Notification> pending;
+    {
+        std::lock_guard lock(g_mutex);
+        if (g_viewId != viewId || !ViewManager::IsValid(viewId)) return;
+        g_ready = true;
+        g_creating = false;
+        pending.assign(std::make_move_iterator(g_pending.begin()), std::make_move_iterator(g_pending.end()));
+        g_pending.clear();
+    }
+
+    for (const auto& notification : pending) InvokeNotification(viewId, notification);
+}
+
+}
+
+Core::PrismaViewId ShowNotification(const std::string& title, const std::string& message, uint32_t duration,
+                                    const std::string& color)
+{
+    Notification notification{title, message, duration, color};
+    Core::PrismaViewId currentView = 0;
+    bool ready = false;
+    bool create = false;
+
+    {
+        std::lock_guard lock(g_mutex);
+        if (g_viewId != 0 && !ViewManager::IsValid(g_viewId)) {
+            g_viewId = 0;
+            g_ready = false;
+            g_creating = false;
+        }
+
+        currentView = g_viewId;
+        ready = g_ready && currentView != 0;
+        if (!ready) {
+            if (g_pending.size() >= kMaxPending) g_pending.pop_front();
+            g_pending.push_back(notification);
+            if (!g_creating) {
+                g_creating = true;
+                create = true;
             }
         }
-
-        // Show the notification via JS
-        logger::info("[NotificationSystem] Attempting to invoke JS, notifId={}, initialized={}",
-                     g_notificationViewId.load(), g_notificationInitialized.load());
-
-        auto api = PluginAPI::PrismaUIInterface::GetSingleton();
-        if (!api) {
-            logger::error("[NotificationSystem] API became unavailable");
-            return 0;
-        }
-
-        if (g_notificationViewId == 0) {
-            logger::error("[NotificationSystem] View ID is still 0");
-            return 0;
-        }
-
-        if (!api->IsValid(g_notificationViewId)) {
-            logger::error("[NotificationSystem] View ID {} is not valid", g_notificationViewId.load());
-            return 0;
-        }
-
-        char jsBuffer[1024];
-        snprintf(jsBuffer, sizeof(jsBuffer),
-            "window.showNotification('%s', '%s', %u, '%s')",
-            EscapeJS(title).c_str(),
-            EscapeJS(message).c_str(),
-            duration,
-            color.c_str());
-
-        logger::info("[NotificationSystem] Invoking JS: {}", jsBuffer);
-        api->Invoke(g_notificationViewId, jsBuffer);
-        logger::info("[NotificationSystem] JS invoked successfully");
-
-        return g_notificationViewId;
     }
 
-    void DismissNotification(Core::PrismaViewId notifId) {
-        auto api = PluginAPI::PrismaUIInterface::GetSingleton();
-        if (api && api->IsValid(notifId)) {
-            api->Invoke(notifId, "window.dismissNotification && window.dismissNotification()");
-        }
+    if (ready) {
+        InvokeNotification(currentView, notification);
+        return currentView;
     }
 
-    void ShowOverlayConflictWarning() {
-        ShowNotification(
-            "GPU Overlay Detected",
-            "GPU monitoring software (RivaTuner, MSI Afterburner, etc.) may conflict with the UI.\n"
-            "If you experience issues, try disabling it.",
-            12000,  // 12 seconds
-            "warning");
+    if (!create) return currentView;
+
+    Core::PrismaViewId created = 0;
+    try {
+        created = ViewManager::Create("notification-banner.html", OnReady);
+    } catch (const std::exception& e) {
+        logger::error("Notification view creation failed: {}", e.what());
+    } catch (...) {
+        logger::error("Notification view creation failed");
     }
+
+    {
+        std::lock_guard lock(g_mutex);
+        if (created == 0) {
+            g_creating = false;
+            return 0;
+        }
+        g_viewId = created;
+        g_ready = false;
+    }
+
+    return created;
+}
+
+void DismissNotification(Core::PrismaViewId notifId)
+{
+    if (!notifId || !ViewManager::IsValid(notifId)) return;
+    Communication::Invoke(notifId,
+        ultralight::String("window.dismissNotification&&window.dismissNotification()"), nullptr);
+}
+
+void ShowOverlayConflictWarning()
+{
+    ShowNotification("GPU Overlay Detected",
+                     "GPU monitoring software may conflict with the UI. If you experience issues, try disabling it.",
+                     12000, "warning");
+}
+
 }

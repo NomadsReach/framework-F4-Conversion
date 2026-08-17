@@ -1,61 +1,53 @@
 #pragma once
 
-#include <vector>
-#include <string>
 #include <algorithm>
+#include <array>
+#include <string>
+#include <string_view>
 
 namespace PrismaUI::URLWhitelist {
 
-static constexpr std::array<std::string_view, 6> WHITELISTED_DOMAINS = {
-    "static.wikia.nocookie.net",    // Fallout wiki images
-    "cdn.jsdelivr.net",              // JavaScript CDN (Tailwind, React, etc.)
-    "fonts.googleapis.com",           // Google Fonts
-    "youtube.com",                   // YouTube videos (youtube.com, www.youtube.com, youtu.be)
-    "youtu.be",                      // YouTube short links
-    "nexusmods.com",                 // Nexus Mods (any game: fallout4.nexusmods.com, skyrim.nexusmods.com, etc.)
+inline constexpr std::array<std::string_view, 6> WHITELISTED_DOMAINS = {
+    "static.wikia.nocookie.net",
+    "cdn.jsdelivr.net",
+    "fonts.googleapis.com",
+    "youtube.com",
+    "youtu.be",
+    "nexusmods.com",
 };
 
 inline bool IsWhitelisted(std::string_view domain) {
-    return std::any_of(
-        WHITELISTED_DOMAINS.begin(),
-        WHITELISTED_DOMAINS.end(),
-        [domain](std::string_view whitelisted) {
-            return domain == whitelisted ||
-                   (domain.size() > whitelisted.size() &&
-                    domain.substr(domain.size() - whitelisted.size()) == whitelisted &&
-                    domain[domain.size() - whitelisted.size() - 1] == '.');
-        }
-    );
+    return std::any_of(WHITELISTED_DOMAINS.begin(), WHITELISTED_DOMAINS.end(), [domain](std::string_view allowed) {
+        return domain == allowed ||
+               (domain.size() > allowed.size() && domain.ends_with(allowed) &&
+                domain[domain.size() - allowed.size() - 1] == '.');
+    });
+}
+
+inline std::string GenerateSourceDirective(std::string_view prefix) {
+    std::string directive(prefix);
+    for (const auto domain : WHITELISTED_DOMAINS) {
+        directive += " https://";
+        directive += domain;
+    }
+    directive += ';';
+    return directive;
 }
 
 inline std::string GenerateImgSrcDirective() {
-    std::string directive = "img-src 'self' data: blob: file:";
-    for (auto domain : WHITELISTED_DOMAINS) {
-        directive += " https://";
-        directive += domain;
-    }
-    directive += ";";
-    return directive;
+    return GenerateSourceDirective("img-src 'self' data: blob: file:");
 }
 
 inline std::string GenerateScriptSrcDirective() {
-    std::string directive = "script-src 'self' 'unsafe-inline' 'unsafe-eval' file: data:";
-    for (auto domain : WHITELISTED_DOMAINS) {
-        directive += " https://";
-        directive += domain;
-    }
-    directive += ";";
-    return directive;
+    return GenerateSourceDirective("script-src 'self' 'unsafe-inline' 'unsafe-eval' file: data:");
 }
 
 inline std::string GenerateStyleSrcDirective() {
-    std::string directive = "style-src 'self' 'unsafe-inline' file: data:";
-    for (auto domain : WHITELISTED_DOMAINS) {
-        directive += " https://";
-        directive += domain;
-    }
-    directive += ";";
-    return directive;
+    return GenerateSourceDirective("style-src 'self' 'unsafe-inline' file: data:");
 }
 
-} // namespace PrismaUI::URLWhitelist
+inline std::string GenerateFontSrcDirective() {
+    return GenerateSourceDirective("font-src 'self' data: file:");
+}
+
+}

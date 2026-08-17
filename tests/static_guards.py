@@ -24,6 +24,8 @@ def main() -> None:
     operations = read("src/PrismaUI/ViewOperationQueue.cpp")
     renderer = read("src/PrismaUI/ViewRenderer.cpp")
     input_handler = read("src/PrismaUI/InputHandler.cpp")
+    listeners = read("src/PrismaUI/Listeners.cpp")
+    network = read("src/PrismaUI/NetworkSandbox.h")
     api = read("src/API/API.cpp")
     papyrus = read("src/PrismaUI/PapyrusBridge.cpp")
     hooks = read("src/Hooks/Hooks.cpp")
@@ -35,6 +37,9 @@ def main() -> None:
     require(view_manager, "isDestroying.compare_exchange_strong", "logical destroy")
     require(operations, "SingleThreadExecutor::Priority::HIGH", "lifecycle priority")
     require(renderer, "mapped.RowPitch < rowBytes", "D3D row bound")
+    require(listeners, "IsTrustedMainFrameUrl", "local main-frame policy")
+    require(listeners, "RestoreLocalView", "external navigation rollback")
+    require(network, "URLWhitelist::GenerateCsp()", "single CSP policy source")
     require(api, "GameThreadDispatcher::Dispatch(", "verified API callback dispatch")
     require(papyrus, "GameThreadDispatcher::Dispatch(", "verified Papyrus dispatch")
     require(hooks, "RetryInputInstall();", "input install retry")
@@ -47,6 +52,7 @@ def main() -> None:
     forbid(input_handler, "g_eventQueue.empty()", "unlocked input queue read")
     forbid(papyrus, "GetTaskInterface", "unverified Papyrus game dispatch")
     forbid(hooks, "MH_ALL_HOOKS", "global MinHook mutation")
+    forbid(network, "kNetworkBlockScript", "duplicated CSP policy")
 
 
 if __name__ == "__main__":

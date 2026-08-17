@@ -55,29 +55,27 @@ namespace PrismaUI::Core {
         RefPtr<View> ultralightView = nullptr;
         RefPtr<View> inspectorView = nullptr;
         std::string htmlPathToLoad;
-        std::string originalUrl;    // Original URL from view creation (for recovery)
-        std::string lastLoadedUrl;  // Track last successfully loaded URL
+        std::string originalUrl;
+        std::string lastLoadedUrl;
         std::atomic<bool> isHidden = false;
         std::unique_ptr<Listeners::MyLoadListener> loadListener;
         std::unique_ptr<Listeners::MyViewListener> viewListener;
         std::atomic<bool> isLoadingFinished = false;
         std::function<void(const PrismaViewId&)> domReadyCallback;
-        std::function<void(PrismaViewId, PRISMA_UI_API::ConsoleMessageLevel, const std::string&)> consoleMessageCallback;
-        std::string translationPluginName;  // Set by RegisterTranslations; empty means no translations loaded
+        std::function<void(PrismaViewId, PRISMA_UI_API::ConsoleMessageLevel, const std::string&)>
+            consoleMessageCallback;
+        std::string translationPluginName;
         std::unordered_map<std::string, std::string> translations;
         int scrollingPixelSize = 28;
         std::atomic<bool> isPaused = false;
         int order = 0;
         std::atomic<bool> inspectorVisible = false;
-        std::atomic<bool> needsRecovery = false;  // Flag for recovery after exception
-        std::atomic<int> recoveryAttempts = 0;    // Track recovery attempts to prevent loops
-
-        // --- Watchdog / health monitoring (see RunWatchdog in Core.cpp) ---
-        std::atomic<uint32_t> faultCount = 0;   // total recovery incidents over the view's lifetime
-        std::atomic<bool> quarantined = false;  // isolated after repeated faults; skipped in update/render
+        std::atomic<bool> needsRecovery = false;
+        std::atomic<int> recoveryAttempts = 0;
+        std::atomic<uint32_t> faultCount = 0;
+        std::atomic<bool> quarantined = false;
         std::chrono::steady_clock::time_point createdAt = std::chrono::steady_clock::now();
 
-        // Inspector rendering data
         std::vector<std::byte> inspectorPixelBuffer;
         uint32_t inspectorBufferWidth = 0;
         uint32_t inspectorBufferHeight = 0;
@@ -95,7 +93,6 @@ namespace PrismaUI::Core {
         uint32_t inspectorDisplayHeight = 0;
         float inspectorOpacity = 1.0f;
 
-        // Primary view rendering data
         ID3D11Texture2D* texture = nullptr;
         ID3D11ShaderResourceView* textureView = nullptr;
         uint32_t textureWidth = 0;
@@ -108,11 +105,11 @@ namespace PrismaUI::Core {
         std::atomic<bool> newFrameReady = false;
         std::atomic<bool> pendingResourceRelease = false;
 
-        // Operation queue fields for thread-safe sequential execution
         std::mutex operationMutex;
         std::queue<std::function<void()>> pendingOperations;
         std::atomic<bool> isProcessingOperation = false;
         std::atomic<int> queuedOperationsCount = 0;
+        std::atomic<bool> isDestroying = false;
 
         ~PrismaView();
     };
@@ -127,7 +124,10 @@ namespace PrismaUI::Core {
     extern ID3D11DeviceContext* d3dContext;
     extern HWND hWnd;
 
-    struct ScreenSize { std::uint32_t width = 0; std::uint32_t height = 0; };
+    struct ScreenSize {
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+    };
     extern ScreenSize screenSize;
 
     extern std::unique_ptr<DirectX::SpriteBatch> spriteBatch;
@@ -155,7 +155,6 @@ namespace PrismaUI::Core {
     void OnResizeBuffers();
     void Shutdown();
 
-    // Inspector View functions
     void CreateInspectorView(const PrismaViewId& viewId);
     void SetInspectorVisibility(const PrismaViewId& viewId, bool visible);
     bool IsInspectorVisible(const PrismaViewId& viewId);

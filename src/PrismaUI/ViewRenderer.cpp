@@ -27,7 +27,7 @@ namespace PrismaUI::ViewRenderer {
                     logger::warn("RenderViews: Found null shared_ptr in views map for ID [{}]", pair.first);
                     continue;
                 }
-                if (!viewPtr->isHidden.load()) {
+                if (!viewPtr->isHidden.load() && !viewPtr->isDestroying.load(std::memory_order_acquire)) {
                     viewsToRender.push_back(viewPtr);
                 }
             }
@@ -39,7 +39,7 @@ namespace PrismaUI::ViewRenderer {
     }
 
     void RenderSingleView(std::shared_ptr<Core::PrismaView> viewData) {
-        if (!viewData || !viewData->ultralightView) return;
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) || !viewData->ultralightView) return;
 
         Surface* surface_base = viewData->ultralightView->surface();
         if (!surface_base) return;
@@ -55,7 +55,7 @@ namespace PrismaUI::ViewRenderer {
     }
 
     void CopyBitmapToBuffer(std::shared_ptr<Core::PrismaView> viewData) {
-        if (!viewData || !viewData->ultralightView) return;
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) || !viewData->ultralightView) return;
         BitmapSurface* surface = static_cast<BitmapSurface*>(viewData->ultralightView->surface());
         if (!surface) return;
         RefPtr<Bitmap> bitmap = surface->bitmap();
@@ -119,7 +119,7 @@ namespace PrismaUI::ViewRenderer {
     }
 
     void UpdateSingleTextureFromBuffer(std::shared_ptr<Core::PrismaView> viewData) {
-        if (!viewData) return;
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire)) return;
 
         if (viewData->pendingResourceRelease.load()) {
             ReleaseViewTexture(viewData.get());
@@ -151,7 +151,8 @@ namespace PrismaUI::ViewRenderer {
 
     void CopyPixelsToTexture(Core::PrismaView* viewData, void* pixels, uint32_t width, uint32_t height,
                              uint32_t stride) {
-        if (!viewData || !d3dDevice || !d3dContext || !pixels || width == 0 || height == 0) return;
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) || !d3dDevice || !d3dContext ||
+            !pixels || width == 0 || height == 0) return;
 
         if (!viewData->texture || viewData->textureWidth != width || viewData->textureHeight != height) {
             logger::debug("View [{}]: Creating/Recreating texture ({}x{})", viewData->id, width, height);
@@ -225,15 +226,8 @@ namespace PrismaUI::ViewRenderer {
             return;
         }
 
-        // Engine continuously restores cursor visibility when unpaused, so hide every frame
-        auto ui = RE::UI::GetSingleton();
-        if (ui) {
-            auto cursorMenu = ui->GetMenu("CursorMenu");
-            if (cursorMenu && cursorMenu->uiMovie) {
-                cursorMenu->uiMovie->SetVisible(false);
-            }
-        }
-
+        // Vanilla CursorMenu suppression is performed by FocusMenu::AdvanceMovie on the
+        // Scaleform/UI thread. Never dereference a Scaleform movie from the Present hook.
         ID3D11BlendState* backupBlendState = nullptr;
         FLOAT backupBlendFactor[4];
         UINT backupSampleMask = 0;
@@ -271,7 +265,8 @@ namespace PrismaUI::ViewRenderer {
             std::shared_lock lock(viewsMutex);
             viewsToDraw.reserve(views.size());
             for (const auto& pair : views) {
-                if (pair.second && !pair.second->isHidden.load() && !pair.second->pendingResourceRelease.load() &&
+                if (pair.second && !pair.second->isDestroying.load(std::memory_order_acquire) &&
+                    !pair.second->isHidden.load() && !pair.second->pendingResourceRelease.load() &&
                     pair.second->textureView) {
                     viewsToDraw.push_back(pair.second);
                 }
@@ -319,7 +314,8 @@ namespace PrismaUI::ViewRenderer {
     }
 
     void DrawSingleTexture(std::shared_ptr<Core::PrismaView> viewData) {
-        if (!viewData || !viewData->textureView || viewData->textureWidth == 0 || viewData->textureHeight == 0) return;
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) || !viewData->textureView ||
+            viewData->textureWidth == 0 || viewData->textureHeight == 0) return;
 
         // Draw main view
         DirectX::SimpleMath::Vector2 position(0.0f, 0.0f);

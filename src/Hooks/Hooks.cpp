@@ -4,12 +4,15 @@
 #include <mutex>
 
 #include "PrismaUI/Core.h"
+#include "PrismaUI/GameThreadDispatcher.h"
+#include "PrismaUI/InputHandler.h"
 
 namespace Hooks {
 namespace {
 
 std::mutex g_hookMutex;
 std::atomic<bool> g_installed{false};
+std::atomic<bool> g_inputInstallPosted{false};
 void* g_presentTarget = nullptr;
 void* g_resizeTarget = nullptr;
 
@@ -29,6 +32,26 @@ void RemoveCreatedHooks()
     D3DHooks::oResizeBuffers = nullptr;
 }
 
+void RetryInputInstall()
+{
+    if (PrismaUI::GameThreadDispatcher::IsReady()) return;
+
+    static uint32_t frames = 0;
+    if ((++frames % 60u) != 0u) return;
+    if (g_inputInstallPosted.exchange(true, std::memory_order_acq_rel)) return;
+
+    auto* tasks = F4SE::GetTaskInterface();
+    if (!tasks) {
+        g_inputInstallPosted.store(false, std::memory_order_release);
+        return;
+    }
+
+    tasks->AddTask([] {
+        PrismaUI::InputHandler::InstallWndProcHook();
+        g_inputInstallPosted.store(false, std::memory_order_release);
+    });
+}
+
 }
 
 HRESULT APIENTRY D3DHooks::HookPresent(REX::W32::IDXGISwapChain* swapChain, UINT syncInterval, UINT flags)
@@ -45,6 +68,7 @@ HRESULT APIENTRY D3DHooks::HookPresent(REX::W32::IDXGISwapChain* swapChain, UINT
 
     try {
         PrismaUI::Core::D3DPresent(0);
+        RetryInputInstall();
     } catch (const std::exception& e) {
         logger::error("Present hook frame failed: {}", e.what());
     } catch (...) {

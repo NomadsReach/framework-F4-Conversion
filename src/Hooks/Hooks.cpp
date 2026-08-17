@@ -1,71 +1,137 @@
 #include "Hooks.h"
+
+#include <atomic>
+#include <mutex>
+
 #include "PrismaUI/Core.h"
 
 namespace Hooks {
-    HRESULT APIENTRY D3DHooks::HookPresent(REX::W32::IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags)
-    {
+namespace {
+
+std::mutex g_hookMutex;
+std::atomic<bool> g_installed{false};
+void* g_presentTarget = nullptr;
+void* g_resizeTarget = nullptr;
+
+void RemoveCreatedHooks()
+{
+    if (g_presentTarget) {
+        MH_DisableHook(g_presentTarget);
+        MH_RemoveHook(g_presentTarget);
+    }
+    if (g_resizeTarget) {
+        MH_DisableHook(g_resizeTarget);
+        MH_RemoveHook(g_resizeTarget);
+    }
+    g_presentTarget = nullptr;
+    g_resizeTarget = nullptr;
+    D3DHooks::oPresent = nullptr;
+    D3DHooks::oResizeBuffers = nullptr;
+}
+
+}
+
+HRESULT APIENTRY D3DHooks::HookPresent(REX::W32::IDXGISwapChain* swapChain, UINT syncInterval, UINT flags)
+{
+    thread_local bool insideHook = false;
+    if (!oPresent) return E_FAIL;
+    if (insideHook) return oPresent(swapChain, syncInterval, flags);
+
+    struct Guard {
+        bool& value;
+        explicit Guard(bool& flag) : value(flag) { value = true; }
+        ~Guard() { value = false; }
+    } guard{insideHook};
+
+    try {
         PrismaUI::Core::D3DPresent(0);
-        return oPresent(pSwapChain, SyncInterval, Flags);
+    } catch (const std::exception& e) {
+        logger::error("Present hook frame failed: {}", e.what());
+    } catch (...) {
+        logger::error("Present hook frame failed");
     }
 
-    HRESULT APIENTRY D3DHooks::HookResizeBuffers(REX::W32::IDXGISwapChain* pSwapChain, UINT BufferCount,
-                                                  UINT Width, UINT Height,
-                                                  REX::W32::DXGI_FORMAT NewFormat, UINT SwapChainFlags)
-    {
+    return oPresent(swapChain, syncInterval, flags);
+}
+
+HRESULT APIENTRY D3DHooks::HookResizeBuffers(REX::W32::IDXGISwapChain* swapChain, UINT bufferCount, UINT width,
+                                              UINT height, REX::W32::DXGI_FORMAT format, UINT swapChainFlags)
+{
+    if (!oResizeBuffers) return E_FAIL;
+
+    try {
         PrismaUI::Core::OnResizeBuffers();
-        return oResizeBuffers(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+    } catch (const std::exception& e) {
+        logger::error("ResizeBuffers cleanup failed: {}", e.what());
+    } catch (...) {
+        logger::error("ResizeBuffers cleanup failed");
     }
 
-    void D3DHooks::Install()
-    {
-        auto* rendererData = RE::BSGraphics::GetRendererData();
-        if (!rendererData || !rendererData->renderWindow[0].swapChain) {
-            logger::critical("D3DHooks::Install: Failed to get IDXGISwapChain from BSGraphics!");
-            return;
-        }
+    return oResizeBuffers(swapChain, bufferCount, width, height, format, swapChainFlags);
+}
 
-        REX::W32::IDXGISwapChain* swapChain = rendererData->renderWindow[0].swapChain;
-        void** vtable = *reinterpret_cast<void***>(swapChain);
+void D3DHooks::Install()
+{
+    std::lock_guard lock(g_hookMutex);
+    if (g_installed.load(std::memory_order_acquire)) return;
 
-        {
-            auto mhStatus = MH_Initialize();
-            if (mhStatus != MH_OK && mhStatus != MH_ERROR_ALREADY_INITIALIZED) {
-                logger::critical("D3DHooks::Install: MH_Initialize failed!");
-                return;
-            }
-        }
-
-        if (MH_CreateHook(vtable[8], &HookPresent, reinterpret_cast<LPVOID*>(&oPresent)) != MH_OK) {
-            logger::critical("D3DHooks::Install: Failed to hook IDXGISwapChain::Present!");
-            return;
-        }
-
-        if (MH_CreateHook(vtable[13], &HookResizeBuffers, reinterpret_cast<LPVOID*>(&oResizeBuffers)) != MH_OK) {
-            logger::critical("D3DHooks::Install: Failed to hook IDXGISwapChain::ResizeBuffers!");
-            return;
-        }
-
-        if (MH_EnableHook(vtable[8]) != MH_OK) {
-            logger::critical("D3DHooks::Install: MH_EnableHook(Present) failed!");
-            return;
-        }
-
-        if (MH_EnableHook(vtable[13]) != MH_OK) {
-            logger::critical("D3DHooks::Install: MH_EnableHook(ResizeBuffers) failed!");
-            return;
-        }
-
-        logger::info("D3D hooks installed: Present(vtable[8]) + ResizeBuffers(vtable[13])");
+    auto* rendererData = RE::BSGraphics::GetRendererData();
+    if (!rendererData || !rendererData->renderWindow[0].swapChain) {
+        logger::critical("D3D hook install failed: swap chain unavailable");
+        return;
     }
 
-    void D3DHooks::Uninstall()
-    {
-        if (MH_DisableHook(MH_ALL_HOOKS) != MH_OK) {
-            logger::warn("D3DHooks::Uninstall: MH_DisableHook failed.");
-        }
-        if (MH_Uninitialize() != MH_OK) {
-            logger::warn("D3DHooks::Uninstall: MH_Uninitialize failed.");
-        }
-        logger::info("D3D hooks uninstalled.");
+    auto* swapChain = rendererData->renderWindow[0].swapChain;
+    void** vtable = *reinterpret_cast<void***>(swapChain);
+    if (!vtable || !vtable[8] || !vtable[13]) {
+        logger::critical("D3D hook install failed: invalid swap-chain vtable");
+        return;
     }
+
+    const MH_STATUS initStatus = MH_Initialize();
+    if (initStatus != MH_OK && initStatus != MH_ERROR_ALREADY_INITIALIZED) {
+        logger::critical("D3D hook install failed: MH_Initialize={}", static_cast<int>(initStatus));
+        return;
+    }
+
+    g_presentTarget = vtable[8];
+    g_resizeTarget = vtable[13];
+
+    if (MH_CreateHook(g_presentTarget, &HookPresent, reinterpret_cast<void**>(&oPresent)) != MH_OK) {
+        logger::critical("D3D hook install failed: Present create");
+        RemoveCreatedHooks();
+        return;
+    }
+
+    if (MH_CreateHook(g_resizeTarget, &HookResizeBuffers, reinterpret_cast<void**>(&oResizeBuffers)) != MH_OK) {
+        logger::critical("D3D hook install failed: ResizeBuffers create");
+        RemoveCreatedHooks();
+        return;
+    }
+
+    if (MH_EnableHook(g_presentTarget) != MH_OK) {
+        logger::critical("D3D hook install failed: Present enable");
+        RemoveCreatedHooks();
+        return;
+    }
+
+    if (MH_EnableHook(g_resizeTarget) != MH_OK) {
+        logger::critical("D3D hook install failed: ResizeBuffers enable");
+        RemoveCreatedHooks();
+        return;
+    }
+
+    g_installed.store(true, std::memory_order_release);
+    logger::info("D3D hooks installed");
+}
+
+void D3DHooks::Uninstall()
+{
+    std::lock_guard lock(g_hookMutex);
+    if (!g_installed.exchange(false, std::memory_order_acq_rel)) return;
+    RemoveCreatedHooks();
+    MH_Uninitialize();
+    logger::info("D3D hooks uninstalled");
+}
+
 }

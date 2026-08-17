@@ -69,7 +69,7 @@ struct PrismaView {
     std::atomic<bool> isPaused{false};
     std::atomic<bool> nativePauseApplied{false};
     std::atomic<bool> isDestroying{false};
-    std::atomic<int> order{0};
+    int order = 0;
     std::atomic<bool> inspectorVisible{false};
     std::atomic<bool> needsRecovery{false};
     std::atomic<int> recoveryAttempts{0};

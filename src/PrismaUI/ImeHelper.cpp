@@ -1,7 +1,9 @@
 #include "ImeHelper.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <imm.h>
+#include <vector>
 #pragma comment(lib, "imm32.lib")
 
 #include "Communication.h"

@@ -1,15 +1,16 @@
 #include "ImeHelper.h"
 
+#include <cstddef>
 #include <cstdio>
 #include <imm.h>
+#include <vector>
+
 #pragma comment(lib, "imm32.lib")
 
 #include "Communication.h"
 #include "Core.h"
-#include "ViewManager.h"
 
 namespace PrismaUI {
-
 namespace {
 
 struct ImeCandidateState {
@@ -21,42 +22,59 @@ struct ImeUiState {
     bool active = false;
     std::string composition;
     int caret = 0;
-    ImeCandidateState candidateState;
+    ImeCandidateState candidates;
 };
 
-UINT GetImeAssociationMessageId() {
-    static const UINT kMessageId = RegisterWindowMessageW(L"PrismaUI.ImeAssociation");
-    return kMessageId;
+UINT AssociationMessageId()
+{
+    static const UINT id = RegisterWindowMessageW(L"PrismaUI.ImeAssociation.v2");
+    return id;
 }
 
-std::string EscapeForJson(const std::string& s) {
-    std::string r;
-    r.reserve(s.size() + 8);
-    for (unsigned char c : s) {
-        if (c == '"')
-            r += "\\\"";
-        else if (c == '\\')
-            r += "\\\\";
-        else if (c == '\n')
-            r += "\\n";
-        else if (c == '\r')
-            r += "\\r";
-        else if (c == '\t')
-            r += "\\t";
-        else if (c < 32) {
-            char hex[8];
-            snprintf(hex, sizeof(hex), "\\u%04x", c);
-            r += hex;
-        } else
-            r += c;
+std::string EscapeJson(const std::string& value)
+{
+    std::string output;
+    output.reserve(value.size() + 8);
+    for (const unsigned char c : value) {
+        switch (c) {
+            case '"': output += "\\\""; break;
+            case '\\': output += "\\\\"; break;
+            case '\n': output += "\\n"; break;
+            case '\r': output += "\\r"; break;
+            case '\t': output += "\\t"; break;
+            case '\b': output += "\\b"; break;
+            case '\f': output += "\\f"; break;
+            default:
+                if (c < 0x20) {
+                    char hex[7]{};
+                    std::snprintf(hex, sizeof(hex), "\\u%04x", static_cast<unsigned>(c));
+                    output += hex;
+                } else {
+                    output.push_back(static_cast<char>(c));
+                }
+                break;
+        }
     }
-    return r;
+    return output;
 }
 
-}  // namespace
+bool ReadCandidate(const std::vector<std::byte>& bytes, DWORD offset, std::wstring& output)
+{
+    if (offset >= bytes.size() || (offset % alignof(wchar_t)) != 0) return false;
+    const auto* text = reinterpret_cast<const wchar_t*>(bytes.data() + offset);
+    const size_t maxChars = (bytes.size() - offset) / sizeof(wchar_t);
+    size_t length = 0;
+    while (length < maxChars && text[length] != L'\0') ++length;
+    if (length == maxChars) return false;
+    output.assign(text, length);
+    return true;
+}
 
-const char* ImeHelper::MessageName(UINT uMsg) {
-    switch (uMsg) {
+}
+
+const char* ImeHelper::MessageName(UINT message)
+{
+    switch (message) {
         case WM_GETDLGCODE: return "WM_GETDLGCODE";
         case WM_INPUTLANGCHANGE: return "WM_INPUTLANGCHANGE";
         case WM_IME_SETCONTEXT: return "WM_IME_SETCONTEXT";
@@ -71,133 +89,161 @@ const char* ImeHelper::MessageName(UINT uMsg) {
 
 void ImeHelper::SetCallbacks(ImeEscapeForJSCallback escapeForJS,
                              ImeQueueCommittedCharCallback queueCommittedChar,
-                             ImeConvertUtf16ToUtf8Callback convertUtf16ToUtf8) {
+                             ImeConvertUtf16ToUtf8Callback convertUtf16ToUtf8)
+{
     m_escapeForJS = std::move(escapeForJS);
     m_queueCommittedChar = std::move(queueCommittedChar);
     m_convertUtf16ToUtf8 = std::move(convertUtf16ToUtf8);
 }
 
-void ImeHelper::SetContext(const ImeHelperContext& ctx) { m_ctx = ctx; }
+void ImeHelper::SetContext(const ImeHelperContext& ctx)
+{
+    m_ctx = ctx;
+}
 
-void ImeHelper::SetExecutor(SingleThreadExecutor* executor) { m_executor = executor; }
+void ImeHelper::SetExecutor(SingleThreadExecutor* executor)
+{
+    m_executor = executor;
+}
 
-void ImeHelper::Initialize(HWND hwnd) {
-    if (!hwnd) return;
+void ImeHelper::Initialize(HWND hwnd)
+{
+    std::lock_guard lock(m_contextMutex);
+    m_window = hwnd;
+    m_associated.store(false, std::memory_order_release);
+}
 
-    // Use system's IME context to preserve conversion mode across focus cycles.
-    // ImmCreateContext yields a fresh context that loses Japanese IME state (a->あ, etc.) on re-associate.
-    m_context = ImmGetContext(hwnd);
-    if (m_context) {
+bool ImeHelper::EnsureContext(HWND hwnd)
+{
+    if (!hwnd) return false;
+
+    DWORD processId = 0;
+    const DWORD ownerThread = GetWindowThreadProcessId(hwnd, &processId);
+    if (!ownerThread || processId != GetCurrentProcessId() || ownerThread != GetCurrentThreadId()) return false;
+
+    std::lock_guard lock(m_contextMutex);
+    if (m_context) return true;
+
+    HIMC previous = ImmAssociateContext(hwnd, nullptr);
+    if (previous) {
+        m_context = previous;
         m_contextOwned = false;
     } else {
         m_context = ImmCreateContext();
-        m_contextOwned = true;
-        if (!m_context) {
-            logger::warn("IME: Failed to create IME context");
-        }
+        m_contextOwned = m_context != nullptr;
     }
 
-    // Start with IME disassociated. The active text input state drives
-    // association via posted window-thread messages.
-    m_associated = false;
+    m_associated.store(false, std::memory_order_release);
+    return m_context != nullptr;
 }
 
-bool ImeHelper::IsTextInputFocused() const {
-    return m_ctx.isTextInputFocused && m_ctx.isTextInputFocused->load();
-}
+void ImeHelper::Shutdown(HWND hwnd)
+{
+    if (!hwnd) return;
 
-void ImeHelper::DispatchScriptToView(Core::PrismaViewId viewId, const std::string& script) {
-    if (!viewId || script.empty()) {
+    DWORD processId = 0;
+    const DWORD ownerThread = GetWindowThreadProcessId(hwnd, &processId);
+    if (!ownerThread || processId != GetCurrentProcessId() || ownerThread != GetCurrentThreadId()) {
+        SetAssociation(false);
         return;
     }
 
+    std::lock_guard lock(m_contextMutex);
+    m_associated.store(false, std::memory_order_release);
+    if (m_context) {
+        if (m_contextOwned) {
+            ImmAssociateContext(hwnd, nullptr);
+            ImmDestroyContext(m_context);
+        } else {
+            ImmAssociateContext(hwnd, m_context);
+        }
+    }
+    m_context = nullptr;
+    m_contextOwned = false;
+    m_window = nullptr;
+}
+
+void ImeHelper::SetAssociation(bool enabled)
+{
+    HWND hwnd = nullptr;
+    {
+        std::lock_guard lock(m_contextMutex);
+        hwnd = m_window;
+    }
+    if (!hwnd) return;
+
+    if (!PostMessageW(hwnd, AssociationMessageId(), enabled ? 1 : 0, 0)) {
+        logger::warn("IME association message failed, GLE={}", GetLastError());
+    }
+}
+
+bool ImeHelper::HandleControlMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM, LRESULT* outResult)
+{
+    if (message != AssociationMessageId()) return false;
+
+    const bool enabled = wParam != 0;
+    if (!EnsureContext(hwnd)) {
+        m_associated.store(false, std::memory_order_release);
+        if (outResult) *outResult = 0;
+        return true;
+    }
+
+    HIMC context = nullptr;
+    {
+        std::lock_guard lock(m_contextMutex);
+        context = m_context;
+    }
+
+    ImmAssociateContext(hwnd, enabled ? context : nullptr);
+    m_associated.store(enabled && context != nullptr, std::memory_order_release);
+    if (outResult) *outResult = 0;
+    return true;
+}
+
+void ImeHelper::ModifySetContextLParam(LPARAM* lParam, UINT message)
+{
+    if (message == WM_IME_SETCONTEXT && lParam) *lParam = 0;
+}
+
+bool ImeHelper::IsTextInputFocused() const
+{
+    return m_ctx.isTextInputFocused && m_ctx.isTextInputFocused->load(std::memory_order_acquire);
+}
+
+void ImeHelper::DispatchScriptToView(Core::PrismaViewId viewId, const std::string& script)
+{
+    if (!viewId || script.empty()) return;
+
     if (m_executor && m_executor->IsWorkerThread() && m_ctx.viewsMap && m_ctx.viewsMapMutex) {
-        std::shared_ptr<Core::PrismaView> viewData = nullptr;
+        std::shared_ptr<Core::PrismaView> viewData;
         {
             std::shared_lock lock(*m_ctx.viewsMapMutex);
             auto it = m_ctx.viewsMap->find(viewId);
-            if (it != m_ctx.viewsMap->end()) {
-                viewData = it->second;
-            }
+            if (it != m_ctx.viewsMap->end()) viewData = it->second;
         }
-
-        if (!viewData || !viewData->ultralightView) {
-            return;
-        }
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) || !viewData->ultralightView) return;
 
         try {
             viewData->ultralightView->EvaluateScript(ultralight::String(script.c_str()), nullptr);
         } catch (const std::exception& e) {
-            logger::error("IME: Failed to dispatch state to View [{}]: {}", viewId, e.what());
+            logger::error("IME script dispatch failed for View [{}]: {}", viewId, e.what());
         } catch (...) {
-            logger::error("IME: Failed to dispatch state to View [{}]: unknown exception", viewId);
+            logger::error("IME script dispatch failed for View [{}]", viewId);
         }
         return;
     }
 
-    Communication::Invoke(viewId, script.c_str());
+    Communication::Invoke(viewId, ultralight::String(script.c_str()), nullptr);
 }
 
-void ImeHelper::Shutdown(HWND hwnd) {
-    if (!m_context) return;
-
-    m_lastKnownTextInputFocus = false;
-    m_associated = false;
-    if (hwnd) {
-        ImmAssociateContext(hwnd, nullptr);
-    }
-    if (m_contextOwned) {
-        ImmDestroyContext(m_context);
-    } else if (hwnd) {
-        ImmReleaseContext(hwnd, m_context);
-    }
-    m_context = nullptr;
-}
-
-void ImeHelper::SetAssociation(bool enabled) {
-    if (!m_context || !m_ctx.hwnd) return;
-
-    const bool previous = m_associated.load();
-    if (previous == enabled) return;
-
-    HWND hwnd = m_ctx.hwnd;
-    HIMC himc = enabled ? m_context : nullptr;
-    if (!PostMessage(hwnd, GetImeAssociationMessageId(), enabled ? 1 : 0, reinterpret_cast<LPARAM>(himc))) {
-        logger::warn("IME: Failed to post association change (enabled={})", enabled);
-        return;
-    }
-
-    m_associated = enabled;
-}
-
-bool ImeHelper::HandleControlMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT* outResult) {
-    if (uMsg != GetImeAssociationMessageId()) {
-        return false;
-    }
-
-    HIMC himc = wParam ? reinterpret_cast<HIMC>(lParam) : nullptr;
-    ImmAssociateContext(hwnd, himc);
-    if (outResult) {
-        *outResult = 0;
-    }
-    return true;
-}
-
-void ImeHelper::ModifySetContextLParam(LPARAM* lParam, UINT uMsg) {
-    if (uMsg == WM_IME_SETCONTEXT && lParam) {
-        // Suppress Windows fallback IME UI in fullscreen (candidate/composition windows).
-        // Skyrim runs fullscreen; native IME windows would overlay the game.
-        *lParam = 0;
-    }
-}
-
-void ImeHelper::ClearStateInJS(Core::PrismaViewId viewId) {
+void ImeHelper::ClearStateInJS(Core::PrismaViewId viewId)
+{
     SendStateToJS(viewId, nullptr, false);
 }
 
-void ImeHelper::SendStateToJS(Core::PrismaViewId viewId, HWND hwnd, bool active) {
-    if (!viewId) return;
-    if (!m_escapeForJS || !m_convertUtf16ToUtf8) return;
+void ImeHelper::SendStateToJS(Core::PrismaViewId viewId, HWND hwnd, bool active)
+{
+    if (!viewId || !m_escapeForJS || !m_convertUtf16ToUtf8) return;
 
     ImeUiState state;
     state.active = active;
@@ -205,149 +251,74 @@ void ImeHelper::SendStateToJS(Core::PrismaViewId viewId, HWND hwnd, bool active)
     if (hwnd) {
         HIMC himc = ImmGetContext(hwnd);
         if (himc) {
-            // Read composition string
-            const LONG compSize = ImmGetCompositionString(himc, GCS_COMPSTR, nullptr, 0);
-            if (compSize > 0) {
-                std::vector<wchar_t> buffer((compSize / static_cast<LONG>(sizeof(wchar_t))) + 1, L'\0');
-                const LONG copied = ImmGetCompositionString(himc, GCS_COMPSTR, buffer.data(), compSize);
-                if (copied > 0) {
-                    std::wstring wideComp(buffer.data(), copied / static_cast<LONG>(sizeof(wchar_t)));
-                    state.composition = m_convertUtf16ToUtf8(wideComp.data(), static_cast<int>(wideComp.size()));
+            const LONG compositionBytes = ImmGetCompositionStringW(himc, GCS_COMPSTR, nullptr, 0);
+            if (compositionBytes > 0 && (compositionBytes % sizeof(wchar_t)) == 0) {
+                std::vector<wchar_t> buffer(static_cast<size_t>(compositionBytes) / sizeof(wchar_t));
+                const LONG copied = ImmGetCompositionStringW(himc, GCS_COMPSTR, buffer.data(), compositionBytes);
+                if (copied > 0 && (copied % sizeof(wchar_t)) == 0) {
+                    state.composition = m_convertUtf16ToUtf8(buffer.data(), copied / sizeof(wchar_t));
                 }
             }
 
-            // Read caret position
-            const LONG cursorPos = ImmGetCompositionString(himc, GCS_CURSORPOS, nullptr, 0);
-            if (cursorPos >= 0) {
-                state.caret = static_cast<int>(cursorPos);
-            }
+            const LONG cursor = ImmGetCompositionStringW(himc, GCS_CURSORPOS, nullptr, 0);
+            if (cursor >= 0) state.caret = static_cast<int>(cursor);
 
-            // Read candidate list
-            const DWORD bytesNeeded = ImmGetCandidateList(himc, 0, nullptr, 0);
-            if (bytesNeeded > 0) {
-                std::vector<char> buffer(bytesNeeded);
-                const DWORD bytesCopied =
-                    ImmGetCandidateList(himc, 0, reinterpret_cast<LPCANDIDATELIST>(buffer.data()), bytesNeeded);
-                if (bytesCopied >= sizeof(CANDIDATELIST)) {
-                    auto* candidateList = reinterpret_cast<LPCANDIDATELIST>(buffer.data());
-                    const DWORD candidateCount = candidateList->dwCount;
-                    if (candidateCount > 0) {
-                        const DWORD pageStart =
-                            candidateList->dwPageStart < candidateCount ? candidateList->dwPageStart : 0;
-                        const DWORD pageSize =
-                            candidateList->dwPageSize == 0 ? candidateCount : candidateList->dwPageSize;
-                        const DWORD pageEnd =
-                            (pageStart + pageSize) < candidateCount ? (pageStart + pageSize) : candidateCount;
-
+            const DWORD candidateBytes = ImmGetCandidateListW(himc, 0, nullptr, 0);
+            if (candidateBytes >= sizeof(CANDIDATELIST)) {
+                std::vector<std::byte> buffer(candidateBytes);
+                const DWORD copied = ImmGetCandidateListW(
+                    himc, 0, reinterpret_cast<LPCANDIDATELIST>(buffer.data()), candidateBytes);
+                if (copied >= sizeof(CANDIDATELIST) && copied <= buffer.size()) {
+                    buffer.resize(copied);
+                    auto* list = reinterpret_cast<LPCANDIDATELIST>(buffer.data());
+                    const size_t offsetTableBytes = offsetof(CANDIDATELIST, dwOffset) +
+                                                    static_cast<size_t>(list->dwCount) * sizeof(DWORD);
+                    if (offsetTableBytes <= buffer.size()) {
+                        const DWORD pageStart = list->dwPageStart < list->dwCount ? list->dwPageStart : 0;
+                        const DWORD pageSize = list->dwPageSize == 0 ? list->dwCount : list->dwPageSize;
+                        const DWORD pageEnd = std::min<DWORD>(list->dwCount, pageStart + pageSize);
                         for (DWORD index = pageStart; index < pageEnd; ++index) {
-                            if (candidateList->dwOffset[index] >= bytesCopied) continue;
-                            const wchar_t* candidate =
-                                reinterpret_cast<const wchar_t*>(buffer.data() + candidateList->dwOffset[index]);
-                            std::wstring wideCandidate(candidate ? candidate : L"");
-                            std::string utf8Candidate =
-                                wideCandidate.empty() ? ""
-                                                    : m_convertUtf16ToUtf8(wideCandidate.data(),
-                                                                           static_cast<int>(wideCandidate.size()));
-                            state.candidateState.candidates.push_back(std::move(utf8Candidate));
+                            std::wstring candidate;
+                            if (!ReadCandidate(buffer, list->dwOffset[index], candidate)) continue;
+                            state.candidates.candidates.push_back(
+                                m_convertUtf16ToUtf8(candidate.data(), static_cast<int>(candidate.size())));
                         }
-
-                        if (candidateList->dwSelection >= pageStart && candidateList->dwSelection < pageEnd) {
-                            state.candidateState.selectedIndex =
-                                static_cast<int>(candidateList->dwSelection - pageStart);
-                        }
-
-                        // Override with recommended conversion for Japanese IME (とうきょう -> 東京)
-                        if (state.candidateState.candidates.size() > 0 && !state.composition.empty()) {
-                            const HKL hkl =
-                                GetKeyboardLayout(GetWindowThreadProcessId(hwnd, nullptr));
-                            if (hkl) {
-                                std::wstring wideComp;
-                                const LONG cs = ImmGetCompositionString(himc, GCS_COMPSTR, nullptr, 0);
-                                if (cs > 0) {
-                                    std::vector<wchar_t> compBuf((cs / sizeof(wchar_t)) + 1, L'\0');
-                                    ImmGetCompositionString(himc, GCS_COMPSTR, compBuf.data(), cs);
-                                    wideComp.assign(compBuf.data(), cs / sizeof(wchar_t));
-                                }
-                                if (!wideComp.empty()) {
-                                    const DWORD bufSize =
-                                        ImmGetConversionListW(hkl, himc, wideComp.c_str(), nullptr, 0, GCL_CONVERSION);
-                                    if (bufSize >= sizeof(CANDIDATELIST)) {
-                                        std::vector<char> convBuf(bufSize);
-                                        if (ImmGetConversionListW(hkl, himc, wideComp.c_str(),
-                                                                 reinterpret_cast<LPCANDIDATELIST>(convBuf.data()),
-                                                                 bufSize, GCL_CONVERSION) != 0) {
-                                            auto* convList = reinterpret_cast<LPCANDIDATELIST>(convBuf.data());
-                                            if (convList->dwCount > 0 &&
-                                                !(convList->dwStyle == IME_CAND_CODE && convList->dwCount == 1)) {
-                                                const DWORD offset0 = convList->dwOffset[0];
-                                                if (offset0 < bufSize) {
-                                                    const wchar_t* str =
-                                                        reinterpret_cast<const wchar_t*>(convBuf.data() + offset0);
-                                                    if (str) {
-                                                        std::wstring recommended(str);
-                                                        std::string recommendedUtf8 =
-                                                            m_convertUtf16ToUtf8(recommended.data(),
-                                                                               static_cast<int>(recommended.size()));
-                                                        for (size_t i = 0; i < state.candidateState.candidates.size();
-                                                             ++i) {
-                                                            if (state.candidateState.candidates[i] == recommendedUtf8) {
-                                                                state.candidateState.selectedIndex =
-                                                                    static_cast<int>(i);
-                                                                break;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        if (list->dwSelection >= pageStart && list->dwSelection < pageEnd) {
+                            state.candidates.selectedIndex = static_cast<int>(list->dwSelection - pageStart);
                         }
                     }
                 }
             }
             ImmReleaseContext(hwnd, himc);
-        } else if (!active) {
-            // No context, clear state
         }
     }
 
-    // Build and dispatch JSON
-    std::string json = "{";
-    json += "\"active\":";
+    std::string json = "{\"active\":";
     json += state.active ? "true" : "false";
-    json += ",\"composition\":\"";
-    json += EscapeForJson(state.composition);
-    json += "\",\"caret\":";
-    json += std::to_string(state.caret);
-    json += ",\"selectedIndex\":";
-    json += std::to_string(state.candidateState.selectedIndex);
+    json += ",\"composition\":\"" + EscapeJson(state.composition) + "\"";
+    json += ",\"caret\":" + std::to_string(state.caret);
+    json += ",\"selectedIndex\":" + std::to_string(state.candidates.selectedIndex);
     json += ",\"candidates\":[";
-    for (size_t i = 0; i < state.candidateState.candidates.size(); ++i) {
-        if (i > 0) json += ",";
-        json += "\"";
-        json += EscapeForJson(state.candidateState.candidates[i]);
-        json += "\"";
+    for (size_t i = 0; i < state.candidates.candidates.size(); ++i) {
+        if (i) json.push_back(',');
+        json += "\"" + EscapeJson(state.candidates.candidates[i]) + "\"";
     }
     json += "]}";
 
-    const std::string escapedJson = m_escapeForJS(json);
-    if (escapedJson.empty()) return;
-
-    const std::string script =
-        "window.dispatchEvent(new CustomEvent('prismaIME_state',{detail:JSON.parse('" + escapedJson + "')}))";
-    DispatchScriptToView(viewId, script);
+    const std::string escaped = m_escapeForJS(json);
+    if (escaped.empty()) return;
+    DispatchScriptToView(viewId,
+        "window.dispatchEvent(new CustomEvent('prismaIME_state',{detail:JSON.parse('" + escaped + "')}))");
 }
 
-bool ImeHelper::HandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
-                              Core::PrismaViewId focusedViewId, bool* outHandled) {
-    if (!outHandled || focusedViewId == 0) return false;
+bool ImeHelper::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                              Core::PrismaViewId focusedViewId, bool* outHandled)
+{
+    if (!outHandled || focusedViewId == 0 || !m_associated.load(std::memory_order_acquire) || !IsTextInputFocused()) {
+        return false;
+    }
 
-    if (!m_associated.load()) return false;
-    if (!IsTextInputFocused()) return false;
-
-    switch (uMsg) {
+    switch (message) {
         case WM_IME_STARTCOMPOSITION:
             *outHandled = true;
             SendStateToJS(focusedViewId, hwnd, true);
@@ -361,16 +332,15 @@ bool ImeHelper::HandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam
             return true;
         case WM_IME_COMPOSITION: {
             *outHandled = true;
-            if (m_queueCommittedChar) {
+            if (m_queueCommittedChar && (lParam & GCS_RESULTSTR)) {
                 HIMC himc = ImmGetContext(hwnd);
                 if (himc) {
-                    if (lParam & GCS_RESULTSTR) {
-                        const int size = ImmGetCompositionString(himc, GCS_RESULTSTR, nullptr, 0);
-                        if (size > 0) {
-                            std::vector<wchar_t> buf((size / sizeof(wchar_t)) + 1, L'\0');
-                            ImmGetCompositionString(himc, GCS_RESULTSTR, buf.data(),
-                                                   static_cast<DWORD>(buf.size() * sizeof(wchar_t)));
-                            m_queueCommittedChar(std::wstring(buf.data()), lParam);
+                    const LONG bytes = ImmGetCompositionStringW(himc, GCS_RESULTSTR, nullptr, 0);
+                    if (bytes > 0 && (bytes % sizeof(wchar_t)) == 0) {
+                        std::vector<wchar_t> buffer(static_cast<size_t>(bytes) / sizeof(wchar_t));
+                        const LONG copied = ImmGetCompositionStringW(himc, GCS_RESULTSTR, buffer.data(), bytes);
+                        if (copied > 0 && (copied % sizeof(wchar_t)) == 0) {
+                            m_queueCommittedChar(std::wstring(buffer.data(), copied / sizeof(wchar_t)), lParam);
                         }
                     }
                     ImmReleaseContext(hwnd, himc);
@@ -390,44 +360,40 @@ bool ImeHelper::HandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam
     }
 }
 
-void ImeHelper::UpdateStateImpl(Core::PrismaViewId viewId) {
+void ImeHelper::UpdateStateImpl(Core::PrismaViewId viewId)
+{
     if (!m_ctx.viewsMap || !m_ctx.viewsMapMutex || viewId == 0) {
-        m_lastKnownTextInputFocus = false;
+        m_lastKnownTextInputFocus.store(false, std::memory_order_release);
         return;
     }
 
-    bool stillFocused = false;
+    bool focused = false;
     if (m_ctx.focusedViewIdMutex && m_ctx.currentlyFocusedViewId && m_ctx.isAnyInputCaptureActive) {
         std::lock_guard lock(*m_ctx.focusedViewIdMutex);
-        stillFocused =
-            m_ctx.isAnyInputCaptureActive->load() && *m_ctx.currentlyFocusedViewId == viewId;
+        focused = m_ctx.isAnyInputCaptureActive->load(std::memory_order_acquire) &&
+                  *m_ctx.currentlyFocusedViewId == viewId;
     }
 
-    if (!stillFocused) {
-        m_lastKnownTextInputFocus = false;
+    if (!focused) {
+        m_lastKnownTextInputFocus.store(false, std::memory_order_release);
         ClearStateInJS(viewId);
         return;
     }
 
-    const bool textInputFocused = IsTextInputFocused();
-    m_lastKnownTextInputFocus = textInputFocused;
-
-    if (!textInputFocused) {
-        ClearStateInJS(viewId);
-    }
+    const bool textFocused = IsTextInputFocused();
+    m_lastKnownTextInputFocus.store(textFocused, std::memory_order_release);
+    if (!textFocused) ClearStateInJS(viewId);
 }
 
-void ImeHelper::UpdateStateForFocusedView(Core::PrismaViewId viewId) {
+void ImeHelper::UpdateStateForFocusedView(Core::PrismaViewId viewId)
+{
     if (!m_executor) return;
-
     if (m_executor->IsWorkerThread()) {
         UpdateStateImpl(viewId);
         return;
     }
-
-    m_executor->submit_with_priority(
-        SingleThreadExecutor::Priority::HIGH,
-        [this, viewId]() { UpdateStateImpl(viewId); });
+    m_executor->submit_with_priority(SingleThreadExecutor::Priority::HIGH,
+        [this, viewId] { UpdateStateImpl(viewId); });
 }
 
-}  // namespace PrismaUI
+}

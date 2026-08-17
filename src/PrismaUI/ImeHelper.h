@@ -13,12 +13,10 @@ class SingleThreadExecutor;
 
 namespace PrismaUI {
 
-// Callbacks ImeHelper needs from InputHandler (avoids circular dependency)
 using ImeEscapeForJSCallback = std::function<std::string(const std::string&)>;
 using ImeQueueCommittedCharCallback = std::function<void(const std::wstring&, LPARAM)>;
 using ImeConvertUtf16ToUtf8Callback = std::function<std::string(const wchar_t*, int)>;
 
-// Context references for focus/IME state checks
 struct ImeHelperContext {
     HWND hwnd = nullptr;
     std::map<Core::PrismaViewId, std::shared_ptr<Core::PrismaView>>* viewsMap = nullptr;
@@ -29,50 +27,34 @@ struct ImeHelperContext {
     std::atomic<bool>* isTextInputFocused = nullptr;
 };
 
-// Custom IME composition support: reads Windows IME state and dispatches to JS
-// for custom candidate/composition UI (hides native IME windows in fullscreen).
 class ImeHelper {
 public:
     ImeHelper() = default;
     ~ImeHelper() = default;
 
-    // Initialize IME context. Must be called on main thread with valid hwnd.
     void Initialize(HWND hwnd);
-
-    // Release IME context and disassociate from window. Call before hwnd becomes invalid.
     void Shutdown(HWND hwnd);
-
-    // Set callbacks and context. Call after Initialize, before any other operations.
     void SetCallbacks(ImeEscapeForJSCallback escapeForJS, ImeQueueCommittedCharCallback queueCommittedChar,
                       ImeConvertUtf16ToUtf8Callback convertUtf16ToUtf8);
     void SetContext(const ImeHelperContext& ctx);
     void SetExecutor(SingleThreadExecutor* executor);
 
-    // Associate/unassociate IME context with window. Must run on main thread for ImmAssociateContext.
+    // ImmAssociateContext must run on the window thread.
     void SetAssociation(bool enabled);
 
-    // Update IME state based on focused view and text input focus. Call from ultralight thread
-    // or via executor.
+    // Runs on the Ultralight worker or through its executor.
     void UpdateStateForFocusedView(Core::PrismaViewId viewId);
 
-    // Send current IME composition/candidate state to JS, or clear it.
     void SendStateToJS(Core::PrismaViewId viewId, HWND hwnd, bool active);
     void ClearStateInJS(Core::PrismaViewId viewId);
-
-    // Returns true if IME is currently associated with the window.
     bool IsAssociated() const { return m_associated.load(); }
-
-    // Handle WM_IME_* in SubclassProc. Returns true if message was consumed (handled).
-    bool HandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
-                       Core::PrismaViewId focusedViewId, bool* outHandled);
-
-    // Handle internal control messages that must run on the window thread.
+    bool HandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, Core::PrismaViewId focusedViewId,
+                       bool* outHandled);
     bool HandleControlMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT* outResult);
 
-    // Modify lParam for WM_IME_SETCONTEXT (suppress native IME UI). Call before DefSubclassProc.
+    // Apply before DefSubclassProc handles WM_IME_SETCONTEXT.
     void ModifySetContextLParam(LPARAM* lParam, UINT uMsg);
 
-    // Returns human-readable name for IME message type.
     static const char* MessageName(UINT uMsg);
 
 private:
@@ -92,4 +74,4 @@ private:
     SingleThreadExecutor* m_executor = nullptr;
 };
 
-}  // namespace PrismaUI
+}

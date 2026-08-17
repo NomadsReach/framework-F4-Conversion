@@ -9,8 +9,6 @@
 
 namespace PrismaUI::PapyrusBridge {
 
-// Injects window.prisma into a view.
-// Must be called from OnWindowObjectReady (Ultralight thread, inside callback).
 void InjectBridge(ultralight::View* caller, Core::PrismaViewId viewId);
 
-} // namespace PrismaUI::PapyrusBridge
+}

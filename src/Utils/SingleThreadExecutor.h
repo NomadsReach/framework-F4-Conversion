@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <future>

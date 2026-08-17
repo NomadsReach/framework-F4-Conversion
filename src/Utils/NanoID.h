@@ -1,27 +1,26 @@
-﻿#pragma once
+#pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <limits>
-#include <random>
-
-
-typedef uint64_t NanoId;
+#include <stdexcept>
 
 class NanoIdGenerator {
 public:
-  NanoIdGenerator() : rng_(rd_()) {}
-
-  NanoId generate() {
-    std::uniform_int_distribution<uint64_t> distribution(
-        1, (std::numeric_limits<uint64_t>::max)());
-
-    return distribution(rng_);
-  }
-
-  NanoIdGenerator(const NanoIdGenerator &) = delete;
-  NanoIdGenerator &operator=(const NanoIdGenerator &) = delete;
+    std::uint64_t generate()
+    {
+        std::uint64_t current = next_.load(std::memory_order_relaxed);
+        while (true) {
+            if (current == 0 || current == std::numeric_limits<std::uint64_t>::max()) {
+                throw std::overflow_error("PrismaUI view ID space exhausted");
+            }
+            if (next_.compare_exchange_weak(current, current + 1, std::memory_order_relaxed,
+                                            std::memory_order_relaxed)) {
+                return current;
+            }
+        }
+    }
 
 private:
-  std::random_device rd_;
-  std::mt19937_64 rng_;
+    std::atomic<std::uint64_t> next_{1};
 };

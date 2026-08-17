@@ -2,58 +2,44 @@
 
 #include <Windows.h>
 #include <filesystem>
-#include <vector>
-#include <string>
 #include <mutex>
+#include <string>
+#include <vector>
 
-// Note: This header depends on 'logger' namespace from PCH.h (F4SE::log)
-
-namespace PrismaUI::Utils
-{
-    // Common base path for PrismaUI data files
-    inline std::filesystem::path GetBasePath()
-    {
+namespace PrismaUI::Utils {
+    inline std::filesystem::path GetBasePath() {
         return std::filesystem::current_path() / "Data" / "PrismaUI_F4";
     }
 
-    class DllLoader
-    {
+    class DllLoader {
     public:
-        static DllLoader& GetSingleton()
-        {
+        static DllLoader& GetSingleton() {
             static DllLoader instance;
             return instance;
         }
 
-        // Load Ultralight DLLs from the specified path
-        // Must be called before any Ultralight API usage
-        bool LoadUltralightLibraries()
-        {
+        bool LoadUltralightLibraries() {
             std::lock_guard<std::mutex> lock(m_mutex);
-            
             if (m_loaded) {
                 return true;
             }
 
             auto libsPath = GetBasePath() / "libs";
-
             if (!std::filesystem::exists(libsPath)) {
                 logger::error("Ultralight libs path does not exist: {}", libsPath.string());
                 return false;
             }
 
-            // Load order matters due to dependencies:
-            // UltralightCore -> WebCore -> Ultralight -> AppCore
+            // Ultralight DLL dependency order is significant.
             const std::vector<std::wstring> dllNames = {
                 L"UltralightCore.dll",
                 L"WebCore.dll",
                 L"Ultralight.dll",
-                L"AppCore.dll"
+                L"AppCore.dll",
             };
 
             for (const auto& dllName : dllNames) {
                 auto dllPath = libsPath / dllName;
-                
                 if (!std::filesystem::exists(dllPath)) {
                     logger::error("DLL not found: {}", dllPath.string());
                     UnloadAllInternal();
@@ -61,7 +47,6 @@ namespace PrismaUI::Utils
                 }
 
                 HMODULE handle = LoadLibraryW(dllPath.c_str());
-                
                 if (!handle) {
                     DWORD error = GetLastError();
                     logger::error("Failed to load DLL: {} (Error: {})", dllPath.string(), error);
@@ -78,9 +63,7 @@ namespace PrismaUI::Utils
             return true;
         }
 
-        // Unload all loaded DLLs (in reverse order)
-        void UnloadAll()
-        {
+        void UnloadAll() {
             std::lock_guard<std::mutex> lock(m_mutex);
             UnloadAllInternal();
         }
@@ -94,21 +77,22 @@ namespace PrismaUI::Utils
         DllLoader(const DllLoader&) = delete;
         DllLoader& operator=(const DllLoader&) = delete;
 
-        void UnloadAllInternal()
-        {
+        void UnloadAllInternal() {
             if (!m_loadedModules.empty()) {
-                logger::info("DllLoader: unloading {} Ultralight DLL(s) in reverse order",
-                             m_loadedModules.size());
+                logger::info("DllLoader: unloading {} Ultralight DLL(s) in reverse order", m_loadedModules.size());
             }
+
             for (auto it = m_loadedModules.rbegin(); it != m_loadedModules.rend(); ++it) {
-                if (*it) {
-                    char modName[MAX_PATH] = {};
-                    GetModuleFileNameA(*it, modName, MAX_PATH);
-                    FreeLibrary(*it);
-                    logger::info("DllLoader: unloaded '{}'",
-                                 modName[0] ? modName : "<unknown>");
+                if (!*it) {
+                    continue;
                 }
+
+                char modName[MAX_PATH] = {};
+                GetModuleFileNameA(*it, modName, MAX_PATH);
+                FreeLibrary(*it);
+                logger::info("DllLoader: unloaded '{}'", modName[0] ? modName : "<unknown>");
             }
+
             m_loadedModules.clear();
             m_loaded = false;
         }

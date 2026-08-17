@@ -1,9 +1,9 @@
 #include "NotificationSystem.h"
 
-#include "Communication.h"
-#include "ViewManager.h"
 #include "../API/API.h"
 #include "../PCH.h"
+#include "Communication.h"
+#include "ViewManager.h"
 
 namespace PrismaUI::NotificationSystem {
     static std::atomic<Core::PrismaViewId> g_notificationViewId = 0;
@@ -12,19 +12,23 @@ namespace PrismaUI::NotificationSystem {
     static auto EscapeJS(const std::string& s) -> std::string {
         std::string escaped;
         for (char c : s) {
-            if (c == '\'') escaped += "\\'";
-            else if (c == '\\') escaped += "\\\\";
-            else if (c == '\n') escaped += "\\n";
-            else escaped += c;
+            if (c == '\'') {
+                escaped += "\\'";
+            } else if (c == '\\') {
+                escaped += "\\\\";
+            } else if (c == '\n') {
+                escaped += "\\n";
+            } else {
+                escaped += c;
+            }
         }
         return escaped;
     }
 
-    Core::PrismaViewId ShowNotification(const std::string& title, const std::string& message,
-                                        uint32_t duration, const std::string& color) {
+    Core::PrismaViewId ShowNotification(const std::string& title, const std::string& message, uint32_t duration,
+                                        const std::string& color) {
         logger::info("[NotificationSystem::ShowNotification] Attempting to show: '{}' | '{}'", title, message);
 
-        // Create the notification view if not already created
         if (!g_notificationInitialized) {
             logger::info("[NotificationSystem] Initializing notification view...");
 
@@ -38,13 +42,11 @@ namespace PrismaUI::NotificationSystem {
             logger::info("[NotificationSystem] API available, creating view...");
 
             try {
-                Core::PrismaViewId notifId = ViewManager::Create(
-                    "notification-banner.html",
-                    [](Core::PrismaViewId viewId) {
-                        logger::info("[NotificationSystem] Notification view DOM ready, ID: {}", viewId);
-                        g_notificationViewId = viewId;
-                        g_notificationInitialized = true;
-                    });
+                Core::PrismaViewId notifId = ViewManager::Create("notification-banner.html", [](Core::PrismaViewId viewId) {
+                    logger::info("[NotificationSystem] Notification view DOM ready, ID: {}", viewId);
+                    g_notificationViewId = viewId;
+                    g_notificationInitialized = true;
+                });
 
                 if (notifId == 0) {
                     logger::error("[NotificationSystem] ViewManager::Create returned 0");
@@ -60,7 +62,6 @@ namespace PrismaUI::NotificationSystem {
             }
         }
 
-        // Show the notification via JS
         logger::info("[NotificationSystem] Attempting to invoke JS, notifId={}, initialized={}",
                      g_notificationViewId.load(), g_notificationInitialized.load());
 
@@ -81,17 +82,12 @@ namespace PrismaUI::NotificationSystem {
         }
 
         char jsBuffer[1024];
-        snprintf(jsBuffer, sizeof(jsBuffer),
-            "window.showNotification('%s', '%s', %u, '%s')",
-            EscapeJS(title).c_str(),
-            EscapeJS(message).c_str(),
-            duration,
-            color.c_str());
+        snprintf(jsBuffer, sizeof(jsBuffer), "window.showNotification('%s', '%s', %u, '%s')", EscapeJS(title).c_str(),
+                 EscapeJS(message).c_str(), duration, color.c_str());
 
         logger::info("[NotificationSystem] Invoking JS: {}", jsBuffer);
         api->Invoke(g_notificationViewId, jsBuffer);
         logger::info("[NotificationSystem] JS invoked successfully");
-
         return g_notificationViewId;
     }
 
@@ -103,11 +99,9 @@ namespace PrismaUI::NotificationSystem {
     }
 
     void ShowOverlayConflictWarning() {
-        ShowNotification(
-            "GPU Overlay Detected",
-            "GPU monitoring software (RivaTuner, MSI Afterburner, etc.) may conflict with the UI.\n"
-            "If you experience issues, try disabling it.",
-            12000,  // 12 seconds
-            "warning");
+        ShowNotification("GPU Overlay Detected",
+                         "GPU monitoring software (RivaTuner, MSI Afterburner, etc.) may conflict with the UI.\n"
+                         "If you experience issues, try disabling it.",
+                         12000, "warning");
     }
 }

@@ -69,12 +69,10 @@ namespace PrismaUI::Inspector {
         viewData->inspectorTextureHeight = 0;
     }
 
-    void DestroyInspectorResources(PrismaView* viewData) {
+    void ClearInspectorBuffers(PrismaView* viewData) {
         if (!viewData) {
             return;
         }
-
-        ReleaseInspectorTexture(viewData);
 
         {
             std::lock_guard bufferLock(viewData->inspectorBufferMutex);
@@ -87,6 +85,15 @@ namespace PrismaUI::Inspector {
 
         viewData->inspectorFrameReady.store(false);
         viewData->inspectorPointerHover.store(false);
+    }
+
+    void DestroyInspectorResources(PrismaView* viewData) {
+        if (!viewData) {
+            return;
+        }
+
+        ReleaseInspectorTexture(viewData);
+        ClearInspectorBuffers(viewData);
     }
 
     void CreateInspectorView(const PrismaViewId& viewId) {

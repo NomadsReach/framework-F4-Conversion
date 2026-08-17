@@ -3,6 +3,7 @@
 #include "Core.h"
 #include "InputHandler.h"
 #include "Inspector.h"
+#include "RenderRetirement.h"
 
 #include <DirectXTK/SimpleMath.h>
 
@@ -258,6 +259,11 @@ namespace PrismaUI::ViewRenderer {
     }
 
     void DrawViews() {
+        // Destroy() can run from plugin/game threads. Defer all final COM Release calls until
+        // this Present-thread boundary so a view snapshotted by the previous frame cannot have
+        // its SRV freed out from under SpriteBatch.
+        RenderRetirement::Drain();
+
         if (!spriteBatch || !commonStates) return;
 
         std::vector<std::shared_ptr<Core::PrismaView>> viewsToDraw;

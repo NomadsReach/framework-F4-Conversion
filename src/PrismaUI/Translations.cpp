@@ -12,7 +12,6 @@ namespace PrismaUI::Translations {
         char exePath[MAX_PATH] = {};
         GetModuleFileNameA(nullptr, exePath, MAX_PATH);
 
-        // Walk up from the exe to find the game root, then append the INI path
         std::string path(exePath);
         auto slashPos = path.rfind('\\');
         if (slashPos == std::string::npos) {
@@ -20,10 +19,7 @@ namespace PrismaUI::Translations {
         }
         std::string gameDir = path.substr(0, slashPos);
 
-        // Priority: Custom.ini (user override) > Prefs.ini > Fallout4.ini (game default).
-        // Return on first hit so higher-priority files win.
         std::vector<std::string> candidates;
-
         char appData[MAX_PATH] = {};
         if (GetEnvironmentVariableA("USERPROFILE", appData, MAX_PATH)) {
             std::string myGames = std::string(appData) + "\\Documents\\My Games\\Fallout4\\";
@@ -56,7 +52,7 @@ namespace PrismaUI::Translations {
     }
 
     std::unordered_map<std::string, std::string> ParseTranslationFile(const std::string& pluginName,
-                                                                       const std::string& lang) {
+                                                                      const std::string& lang) {
         std::unordered_map<std::string, std::string> result;
 
         char exePath[MAX_PATH] = {};
@@ -67,6 +63,7 @@ namespace PrismaUI::Translations {
             logger::error("Translations::ParseTranslationFile: cannot determine game directory from '{}'", exePath);
             return result;
         }
+
         std::string dataDir = path.substr(0, slashPos) + "\\Data";
         std::string filePath = dataDir + "\\Interface\\Translations\\" + pluginName + "_" + lang + ".txt";
         logger::debug("Translations::ParseTranslationFile: trying '{}'", filePath);
@@ -76,12 +73,13 @@ namespace PrismaUI::Translations {
             if (lang != FALLBACK_LANG) {
                 std::string fallbackPath =
                     dataDir + "\\Interface\\Translations\\" + pluginName + "_" + FALLBACK_LANG + ".txt";
-                logger::warn("Translations::ParseTranslationFile: '{}' not found, trying fallback '{}'",
-                             filePath, fallbackPath);
+                logger::warn("Translations::ParseTranslationFile: '{}' not found, trying fallback '{}'", filePath,
+                             fallbackPath);
                 file.open(fallbackPath, std::ios::binary);
                 if (!file.is_open()) {
-                    logger::warn("Translations::ParseTranslationFile: fallback '{}' not found either, no translations loaded",
-                                 fallbackPath);
+                    logger::warn(
+                        "Translations::ParseTranslationFile: fallback '{}' not found either, no translations loaded",
+                        fallbackPath);
                     return result;
                 }
                 logger::info("Translations::ParseTranslationFile: using fallback '{}'", fallbackPath);
@@ -93,11 +91,9 @@ namespace PrismaUI::Translations {
             logger::info("Translations::ParseTranslationFile: opened '{}'", filePath);
         }
 
-        // Read entire file into memory
         file.seekg(0, std::ios::end);
         std::streamsize size = file.tellg();
         file.seekg(0, std::ios::beg);
-
         if (size < 2) {
             return result;
         }
@@ -106,24 +102,18 @@ namespace PrismaUI::Translations {
         file.read(raw.data(), size);
         file.close();
 
-        // Detect and strip UTF-16 LE BOM (FF FE)
         const wchar_t* wStart = nullptr;
         size_t wLen = 0;
-
         if (static_cast<unsigned char>(raw[0]) == 0xFF && static_cast<unsigned char>(raw[1]) == 0xFE) {
-            // UTF-16 LE with BOM
             wStart = reinterpret_cast<const wchar_t*>(raw.data() + 2);
             wLen = (static_cast<size_t>(size) - 2) / sizeof(wchar_t);
         } else {
-            // Try to treat as UTF-8 plain text (no BOM)
-            // Parse line-by-line directly
             std::istringstream ss(std::string(raw.data(), static_cast<size_t>(size)));
             std::string line;
             while (std::getline(ss, line)) {
                 if (line.empty() || line[0] != '$') {
                     continue;
                 }
-                // Strip trailing \r
                 if (!line.empty() && line.back() == '\r') {
                     line.pop_back();
                 }
@@ -131,25 +121,36 @@ namespace PrismaUI::Translations {
                 if (tabPos == std::string::npos) {
                     continue;
                 }
-                std::string key = line.substr(0, tabPos);
-                std::string value = line.substr(tabPos + 1);
-                result[key] = value;
+                result[line.substr(0, tabPos)] = line.substr(tabPos + 1);
             }
-            logger::info("Translations::ParseTranslationFile: loaded {} entries (UTF-8) for '{}'",
-                         result.size(), pluginName);
+            logger::info("Translations::ParseTranslationFile: loaded {} entries (UTF-8) for '{}'", result.size(),
+                         pluginName);
             return result;
         }
 
-        // Convert UTF-16 LE wide string to std::wstring, then each line to UTF-8
         std::wstring wide(wStart, wLen);
         std::wistringstream wss(wide);
         std::wstring wline;
+
+        auto toUtf8 = [](const std::wstring& value) -> std::string {
+            if (value.empty()) {
+                return "";
+            }
+            int len = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0,
+                                          nullptr, nullptr);
+            if (len <= 0) {
+                return "";
+            }
+            std::string out(len, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), out.data(), len, nullptr,
+                                nullptr);
+            return out;
+        };
 
         while (std::getline(wss, wline)) {
             if (wline.empty() || wline[0] != L'$') {
                 continue;
             }
-            // Strip trailing \r
             if (!wline.empty() && wline.back() == L'\r') {
                 wline.pop_back();
             }
@@ -157,38 +158,22 @@ namespace PrismaUI::Translations {
             if (tabPos == std::wstring::npos) {
                 continue;
             }
-            std::wstring wkey = wline.substr(0, tabPos);
-            std::wstring wval = wline.substr(tabPos + 1);
 
-            // Convert key and value to UTF-8
-            auto toUtf8 = [](const std::wstring& ws) -> std::string {
-                if (ws.empty()) return "";
-                int len = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), nullptr, 0, nullptr,
-                                             nullptr);
-                if (len <= 0) return "";
-                std::string out(len, '\0');
-                WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), out.data(), len, nullptr,
-                                    nullptr);
-                return out;
-            };
-
-            std::string key = toUtf8(wkey);
-            std::string val = toUtf8(wval);
+            std::string key = toUtf8(wline.substr(0, tabPos));
             if (!key.empty()) {
-                result[key] = val;
+                result[key] = toUtf8(wline.substr(tabPos + 1));
             }
         }
 
-        logger::info("Translations::ParseTranslationFile: loaded {} entries (UTF-16 LE) for '{}'",
-                     result.size(), pluginName);
+        logger::info("Translations::ParseTranslationFile: loaded {} entries (UTF-16 LE) for '{}'", result.size(),
+                     pluginName);
         return result;
     }
 
-    // Escape a UTF-8 string for embedding inside a JS double-quoted string literal
-    static std::string jsEscape(const std::string& s) {
+    static std::string jsEscape(const std::string& value) {
         std::string out;
-        out.reserve(s.size() + 8);
-        for (unsigned char c : s) {
+        out.reserve(value.size() + 8);
+        for (unsigned char c : value) {
             if (c == '\\') {
                 out += "\\\\";
             } else if (c == '"') {
@@ -214,15 +199,15 @@ namespace PrismaUI::Translations {
         script += "window.L10N={";
 
         bool first = true;
-        for (const auto& kv : translations) {
+        for (const auto& [key, value] : translations) {
             if (!first) {
                 script += ',';
             }
             first = false;
             script += '"';
-            script += jsEscape(kv.first);
+            script += jsEscape(key);
             script += "\":\"";
-            script += jsEscape(kv.second);
+            script += jsEscape(value);
             script += '"';
         }
 

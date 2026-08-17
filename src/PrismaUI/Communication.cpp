@@ -28,7 +28,7 @@ namespace PrismaUI::Communication {
         }
 
         try {
-            ultralightThread.submit([viewId, viewData, scriptCopy = script, callback = std::move(callback)]() mutable {
+            ultralightThread.submit([viewId, viewData, scriptCopy = script, callback]() mutable {
                 String result = "";
                 if (!viewData->isDestroying.load(std::memory_order_acquire) && viewData->ultralightView) {
                     try {

@@ -1,232 +1,184 @@
 #include "Translations.h"
 
+#include <windows.h>
+
+#include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <vector>
-#include <windows.h>
 
 namespace PrismaUI::Translations {
+namespace {
+constexpr std::streamsize kMaxTranslationFile = 16 * 1024 * 1024;
 
-    std::string DetectGameLanguage() {
-        logger::debug("Translations::DetectGameLanguage: scanning INI files");
-        char exePath[MAX_PATH] = {};
-        GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+bool IsSafeName(const std::string& value)
+{
+    if (value.empty() || value.size() > 128 || value.find("..") != std::string::npos) return false;
+    for (const unsigned char c : value) {
+        if (c < 0x20 || c == '/' || c == '\\' || c == ':') return false;
+    }
+    return true;
+}
 
-        // Walk up from the exe to find the game root, then append the INI path
-        std::string path(exePath);
-        auto slashPos = path.rfind('\\');
-        if (slashPos == std::string::npos) {
-            return FALLBACK_LANG;
-        }
-        std::string gameDir = path.substr(0, slashPos);
+std::filesystem::path GameDirectory()
+{
+    wchar_t path[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return {};
+    return std::filesystem::path(path).parent_path();
+}
 
-        // Priority: Custom.ini (user override) > Prefs.ini > Fallout4.ini (game default).
-        // Return on first hit so higher-priority files win.
-        std::vector<std::string> candidates;
+void ParseUtf8Lines(const std::string& text, std::unordered_map<std::string, std::string>& output)
+{
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line.front() != '$') continue;
+        const size_t tab = line.find('\t');
+        if (tab == std::string::npos) continue;
+        output[line.substr(0, tab)] = line.substr(tab + 1);
+    }
+}
 
-        char appData[MAX_PATH] = {};
-        if (GetEnvironmentVariableA("USERPROFILE", appData, MAX_PATH)) {
-            std::string myGames = std::string(appData) + "\\Documents\\My Games\\Fallout4\\";
-            candidates.push_back(myGames + "Fallout4Custom.ini");
-            candidates.push_back(myGames + "Fallout4Prefs.ini");
-        }
-        candidates.push_back(gameDir + "\\Fallout4.ini");
+std::string WideToUtf8(const std::wstring& value)
+{
+    if (value.empty()) return {};
+    const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()),
+                                         nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+    std::string result(static_cast<size_t>(size), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), result.data(),
+                            size, nullptr, nullptr) != size) return {};
+    return result;
+}
 
-        for (const auto& iniPath : candidates) {
-            char langBuf[64] = {};
-            DWORD result = GetPrivateProfileStringA("General", "sLanguage", "", langBuf, sizeof(langBuf),
-                                                    iniPath.c_str());
-            if (result > 0) {
-                std::string lang(langBuf);
-                for (auto& c : lang) {
-                    c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-                }
-                if (!lang.empty()) {
-                    logger::info("Translations::DetectGameLanguage: '{}' from {}", lang, iniPath);
-                    return lang;
-                }
-            } else {
-                logger::debug("Translations::DetectGameLanguage: no sLanguage in {}", iniPath);
-            }
-        }
-
-        logger::warn("Translations::DetectGameLanguage: no language found in any INI, falling back to '{}'",
-                     FALLBACK_LANG);
-        return FALLBACK_LANG;
+void ParseUtf16Le(const std::vector<unsigned char>& raw, std::unordered_map<std::string, std::string>& output)
+{
+    if (raw.size() < 2 || ((raw.size() - 2) % 2) != 0) return;
+    std::wstring wide;
+    wide.reserve((raw.size() - 2) / 2);
+    for (size_t i = 2; i + 1 < raw.size(); i += 2) {
+        const uint16_t code = static_cast<uint16_t>(raw[i]) |
+                              static_cast<uint16_t>(static_cast<uint16_t>(raw[i + 1]) << 8u);
+        wide.push_back(static_cast<wchar_t>(code));
     }
 
-    std::unordered_map<std::string, std::string> ParseTranslationFile(const std::string& pluginName,
-                                                                       const std::string& lang) {
-        std::unordered_map<std::string, std::string> result;
-
-        char exePath[MAX_PATH] = {};
-        GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-        std::string path(exePath);
-        auto slashPos = path.rfind('\\');
-        if (slashPos == std::string::npos) {
-            logger::error("Translations::ParseTranslationFile: cannot determine game directory from '{}'", exePath);
-            return result;
-        }
-        std::string dataDir = path.substr(0, slashPos) + "\\Data";
-        std::string filePath = dataDir + "\\Interface\\Translations\\" + pluginName + "_" + lang + ".txt";
-        logger::debug("Translations::ParseTranslationFile: trying '{}'", filePath);
-
-        std::ifstream file(filePath, std::ios::binary);
-        if (!file.is_open()) {
-            if (lang != FALLBACK_LANG) {
-                std::string fallbackPath =
-                    dataDir + "\\Interface\\Translations\\" + pluginName + "_" + FALLBACK_LANG + ".txt";
-                logger::warn("Translations::ParseTranslationFile: '{}' not found, trying fallback '{}'",
-                             filePath, fallbackPath);
-                file.open(fallbackPath, std::ios::binary);
-                if (!file.is_open()) {
-                    logger::warn("Translations::ParseTranslationFile: fallback '{}' not found either, no translations loaded",
-                                 fallbackPath);
-                    return result;
-                }
-                logger::info("Translations::ParseTranslationFile: using fallback '{}'", fallbackPath);
-            } else {
-                logger::warn("Translations::ParseTranslationFile: '{}' not found, no translations loaded", filePath);
-                return result;
-            }
-        } else {
-            logger::info("Translations::ParseTranslationFile: opened '{}'", filePath);
-        }
-
-        // Read entire file into memory
-        file.seekg(0, std::ios::end);
-        std::streamsize size = file.tellg();
-        file.seekg(0, std::ios::beg);
-
-        if (size < 2) {
-            return result;
-        }
-
-        std::vector<char> raw(static_cast<size_t>(size));
-        file.read(raw.data(), size);
-        file.close();
-
-        // Detect and strip UTF-16 LE BOM (FF FE)
-        const wchar_t* wStart = nullptr;
-        size_t wLen = 0;
-
-        if (static_cast<unsigned char>(raw[0]) == 0xFF && static_cast<unsigned char>(raw[1]) == 0xFE) {
-            // UTF-16 LE with BOM
-            wStart = reinterpret_cast<const wchar_t*>(raw.data() + 2);
-            wLen = (static_cast<size_t>(size) - 2) / sizeof(wchar_t);
-        } else {
-            // Try to treat as UTF-8 plain text (no BOM)
-            // Parse line-by-line directly
-            std::istringstream ss(std::string(raw.data(), static_cast<size_t>(size)));
-            std::string line;
-            while (std::getline(ss, line)) {
-                if (line.empty() || line[0] != '$') {
-                    continue;
-                }
-                // Strip trailing \r
-                if (!line.empty() && line.back() == '\r') {
-                    line.pop_back();
-                }
-                auto tabPos = line.find('\t');
-                if (tabPos == std::string::npos) {
-                    continue;
-                }
-                std::string key = line.substr(0, tabPos);
-                std::string value = line.substr(tabPos + 1);
-                result[key] = value;
-            }
-            logger::info("Translations::ParseTranslationFile: loaded {} entries (UTF-8) for '{}'",
-                         result.size(), pluginName);
-            return result;
-        }
-
-        // Convert UTF-16 LE wide string to std::wstring, then each line to UTF-8
-        std::wstring wide(wStart, wLen);
-        std::wistringstream wss(wide);
-        std::wstring wline;
-
-        while (std::getline(wss, wline)) {
-            if (wline.empty() || wline[0] != L'$') {
-                continue;
-            }
-            // Strip trailing \r
-            if (!wline.empty() && wline.back() == L'\r') {
-                wline.pop_back();
-            }
-            auto tabPos = wline.find(L'\t');
-            if (tabPos == std::wstring::npos) {
-                continue;
-            }
-            std::wstring wkey = wline.substr(0, tabPos);
-            std::wstring wval = wline.substr(tabPos + 1);
-
-            // Convert key and value to UTF-8
-            auto toUtf8 = [](const std::wstring& ws) -> std::string {
-                if (ws.empty()) return "";
-                int len = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), nullptr, 0, nullptr,
-                                             nullptr);
-                if (len <= 0) return "";
-                std::string out(len, '\0');
-                WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), out.data(), len, nullptr,
-                                    nullptr);
-                return out;
-            };
-
-            std::string key = toUtf8(wkey);
-            std::string val = toUtf8(wval);
-            if (!key.empty()) {
-                result[key] = val;
-            }
-        }
-
-        logger::info("Translations::ParseTranslationFile: loaded {} entries (UTF-16 LE) for '{}'",
-                     result.size(), pluginName);
-        return result;
+    std::wistringstream stream(wide);
+    std::wstring line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+        if (line.empty() || line.front() != L'$') continue;
+        const size_t tab = line.find(L'\t');
+        if (tab == std::wstring::npos) continue;
+        const std::string key = WideToUtf8(line.substr(0, tab));
+        if (!key.empty()) output[key] = WideToUtf8(line.substr(tab + 1));
     }
+}
 
-    // Escape a UTF-8 string for embedding inside a JS double-quoted string literal
-    static std::string jsEscape(const std::string& s) {
-        std::string out;
-        out.reserve(s.size() + 8);
-        for (unsigned char c : s) {
-            if (c == '\\') {
-                out += "\\\\";
-            } else if (c == '"') {
-                out += "\\\"";
-            } else if (c == '\n') {
-                out += "\\n";
-            } else if (c == '\r') {
-                out += "\\r";
-            } else {
-                out += static_cast<char>(c);
-            }
+std::string EscapeJsString(const std::string& value)
+{
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string output;
+    output.reserve(value.size() + 8);
+    for (size_t i = 0; i < value.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(value[i]);
+        if (i + 2 < value.size() && c == 0xE2 && static_cast<unsigned char>(value[i + 1]) == 0x80 &&
+            (static_cast<unsigned char>(value[i + 2]) == 0xA8 || static_cast<unsigned char>(value[i + 2]) == 0xA9)) {
+            output += static_cast<unsigned char>(value[i + 2]) == 0xA8 ? "\\u2028" : "\\u2029";
+            i += 2;
+            continue;
         }
-        return out;
+        switch (c) {
+            case '\\': output += "\\\\"; break;
+            case '"': output += "\\\""; break;
+            case '\n': output += "\\n"; break;
+            case '\r': output += "\\r"; break;
+            case '\t': output += "\\t"; break;
+            case '\b': output += "\\b"; break;
+            case '\f': output += "\\f"; break;
+            default:
+                if (c < 0x20) {
+                    output += "\\u00";
+                    output.push_back(hex[(c >> 4) & 0xF]);
+                    output.push_back(hex[c & 0xF]);
+                } else output.push_back(static_cast<char>(c));
+                break;
+        }
     }
+    return output;
+}
+}
 
-    std::string BuildL10NScript(const std::unordered_map<std::string, std::string>& translations) {
-        if (translations.empty()) {
-            return "";
-        }
-
-        std::string script;
-        script.reserve(translations.size() * 64);
-        script += "window.L10N={";
-
-        bool first = true;
-        for (const auto& kv : translations) {
-            if (!first) {
-                script += ',';
-            }
-            first = false;
-            script += '"';
-            script += jsEscape(kv.first);
-            script += "\":\"";
-            script += jsEscape(kv.second);
-            script += '"';
-        }
-
-        script += "};window.t=function(k){return window.L10N[k]!==undefined?window.L10N[k]:k;};";
-        return script;
+std::string DetectGameLanguage()
+{
+    std::vector<std::filesystem::path> candidates;
+    wchar_t profile[MAX_PATH]{};
+    const DWORD profileLength = GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
+    if (profileLength > 0 && profileLength < MAX_PATH) {
+        const auto myGames = std::filesystem::path(profile) / L"Documents" / L"My Games" / L"Fallout4";
+        candidates.push_back(myGames / L"Fallout4Custom.ini");
+        candidates.push_back(myGames / L"Fallout4Prefs.ini");
     }
+    const auto gameDirectory = GameDirectory();
+    if (!gameDirectory.empty()) candidates.push_back(gameDirectory / L"Fallout4.ini");
+
+    for (const auto& path : candidates) {
+        char buffer[64]{};
+        if (GetPrivateProfileStringA("General", "sLanguage", "", buffer, sizeof(buffer), path.string().c_str()) == 0)
+            continue;
+        std::string language(buffer);
+        for (char& c : language) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (IsSafeName(language)) return language;
+    }
+    return FALLBACK_LANG;
+}
+
+std::unordered_map<std::string, std::string> ParseTranslationFile(const std::string& pluginName,
+                                                                   const std::string& lang)
+{
+    std::unordered_map<std::string, std::string> result;
+    if (!IsSafeName(pluginName) || !IsSafeName(lang)) return result;
+    const auto gameDirectory = GameDirectory();
+    if (gameDirectory.empty()) return result;
+
+    const auto directory = gameDirectory / L"Data" / L"Interface" / L"Translations";
+    auto openFile = [&](const std::string& language) {
+        return std::ifstream(directory / (pluginName + "_" + language + ".txt"), std::ios::binary);
+    };
+
+    std::ifstream file = openFile(lang);
+    if (!file.is_open() && lang != FALLBACK_LANG) file = openFile(FALLBACK_LANG);
+    if (!file.is_open()) return result;
+    file.seekg(0, std::ios::end);
+    const std::streamsize size = file.tellg();
+    if (size <= 0 || size > kMaxTranslationFile) return result;
+    file.seekg(0, std::ios::beg);
+
+    std::vector<unsigned char> raw(static_cast<size_t>(size));
+    if (!file.read(reinterpret_cast<char*>(raw.data()), size)) return result;
+    if (raw.size() >= 2 && raw[0] == 0xFF && raw[1] == 0xFE) ParseUtf16Le(raw, result);
+    else ParseUtf8Lines(std::string(reinterpret_cast<const char*>(raw.data()), raw.size()), result);
+    return result;
+}
+
+std::string BuildL10NScript(const std::unordered_map<std::string, std::string>& translations)
+{
+    if (translations.empty()) return {};
+    std::string script = "window.L10N={";
+    bool first = true;
+    for (const auto& [key, value] : translations) {
+        if (!first) script.push_back(',');
+        first = false;
+        script += '"';
+        script += EscapeJsString(key);
+        script += "\":\"";
+        script += EscapeJsString(value);
+        script += '"';
+    }
+    script += "};window.t=function(k){return window.L10N[k]!==undefined?window.L10N[k]:k;};";
+    return script;
+}
+
 }

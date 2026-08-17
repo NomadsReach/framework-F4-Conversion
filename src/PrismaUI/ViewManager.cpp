@@ -9,6 +9,92 @@
 namespace PrismaUI::ViewManager {
     using namespace Core;
 
+    static void QueueNativeInputStateRefresh() {
+        F4SE::GetTaskInterface()->AddTask([]() {
+            auto controlMap = RE::ControlMap::GetSingleton();
+            if (controlMap) {
+                controlMap->SetIgnoreKeyboardMouse(PrismaUI::InputHandler::IsAnyInputCaptureActive());
+            }
+        });
+    }
+
+    static void QueueNativeFocusState(const std::shared_ptr<PrismaView>& viewData, bool pauseGame) {
+        if (!viewData) {
+            QueueNativeInputStateRefresh();
+            return;
+        }
+
+        if (pauseGame) {
+            viewData->isPaused.store(true, std::memory_order_release);
+        }
+
+        F4SE::GetTaskInterface()->AddTask([viewData, pauseGame]() {
+            if (pauseGame && viewData->isPaused.load(std::memory_order_acquire)) {
+                bool expected = false;
+                if (viewData->nativePauseApplied.compare_exchange_strong(expected, true,
+                                                                         std::memory_order_acq_rel)) {
+                    auto ui = RE::UI::GetSingleton();
+                    if (ui) {
+                        ui->freezeFramePause++;
+                        logger::debug("Game pause applied for View [{}]", viewData->id);
+                    } else {
+                        viewData->nativePauseApplied.store(false, std::memory_order_release);
+                    }
+                }
+            }
+
+            auto controlMap = RE::ControlMap::GetSingleton();
+            if (controlMap) {
+                controlMap->SetIgnoreKeyboardMouse(PrismaUI::InputHandler::IsAnyInputCaptureActive());
+            }
+        });
+    }
+
+    static void QueueNativeUnfocusState(const std::shared_ptr<PrismaView>& viewData) {
+        if (viewData) {
+            viewData->isPaused.store(false, std::memory_order_release);
+        }
+
+        F4SE::GetTaskInterface()->AddTask([viewData]() {
+            if (viewData && !viewData->isPaused.load(std::memory_order_acquire) &&
+                viewData->nativePauseApplied.exchange(false, std::memory_order_acq_rel)) {
+                auto ui = RE::UI::GetSingleton();
+                if (ui && ui->freezeFramePause > 0) {
+                    ui->freezeFramePause--;
+                    logger::debug("Game pause released for View [{}]", viewData->id);
+                }
+            }
+
+            auto controlMap = RE::ControlMap::GetSingleton();
+            if (controlMap) {
+                controlMap->SetIgnoreKeyboardMouse(PrismaUI::InputHandler::IsAnyInputCaptureActive());
+            }
+        });
+    }
+
+    // closeFocusMenu: false when switching focus between views that share the same modal capture menu.
+    // Native Fallout state is intentionally queued to the game/UI task interfaces instead of being
+    // mutated from the Ultralight worker thread.
+    static void PerformUnfocusOperations(const Core::PrismaViewId& viewId, const std::shared_ptr<PrismaView>& viewData,
+                                         bool closeFocusMenu = true) {
+        PrismaUI::InputHandler::DisableInputCapture(viewId);
+        PrismaUI::InputHandler::ClearImeState(viewId);
+
+        if (viewData && viewData->ultralightView) {
+            viewData->ultralightView->Unfocus();
+        }
+
+        if (closeFocusMenu) {
+            FocusMenu::Close();
+        }
+
+        if (viewData) {
+            QueueNativeUnfocusState(viewData);
+        } else {
+            QueueNativeInputStateRefresh();
+        }
+    }
+
     Core::PrismaViewId Create(const std::string& htmlPath, std::function<void(Core::PrismaViewId)> onDomReadyCallback) {
         bool expected_init = false;
         if (coreInitialized.compare_exchange_strong(expected_init, true)) {
@@ -65,35 +151,6 @@ namespace PrismaUI::ViewManager {
         return newViewId;
     }
 
-    // closeFocusMenu: false when switching focus between views (skip menu close in that case)
-    static void PerformUnfocusOperations(const Core::PrismaViewId& viewId, std::shared_ptr<PrismaView> viewData,
-                                         bool closeFocusMenu = true) {
-        if (!viewData || !viewData->ultralightView) {
-            return;
-        }
-
-        if (viewData->isPaused.load()) {
-            auto ui = RE::UI::GetSingleton();
-            if (ui && ui->freezeFramePause > 0) {
-                ui->freezeFramePause--;
-            }
-            viewData->isPaused.store(false);
-        }
-
-        PrismaUI::InputHandler::DisableInputCapture(viewId);
-        if (closeFocusMenu) {
-            PrismaUI::InputHandler::ClearImeState(viewId);
-        }
-        viewData->ultralightView->Unfocus();
-
-        if (closeFocusMenu) {
-            FocusMenu::Close();
-        }
-
-        auto controlMap = RE::ControlMap::GetSingleton();
-        controlMap->SetIgnoreKeyboardMouse(false);
-    }
-
     void Show(const Core::PrismaViewId& viewId) {
         if (!ViewManager::IsValid(viewId)) {
             logger::warn("Show: View ID [{}] not found.", viewId);
@@ -110,7 +167,7 @@ namespace PrismaUI::ViewManager {
                 }
             }
 
-            if (viewData) {
+            if (viewData && !viewData->isDestroying.load(std::memory_order_acquire)) {
                 if (!viewData->isHidden.load()) {
                     logger::debug("Show: View [{}] is already visible.", viewId);
                     return;
@@ -137,13 +194,17 @@ namespace PrismaUI::ViewManager {
                 }
             }
 
-            if (viewData) {
+            if (viewData && !viewData->isDestroying.load(std::memory_order_acquire)) {
                 if (viewData->isHidden.load()) {
                     logger::debug("Hide: View [{}] is already hidden.", viewId);
                     return;
                 }
 
-                if (viewData->ultralightView && viewData->ultralightView->HasFocus()) {
+                const bool hasUltralightFocus = viewData->ultralightView && viewData->ultralightView->HasFocus();
+                const bool ownsInputCapture = PrismaUI::InputHandler::IsInputCaptureActiveForView(viewId);
+                const bool ownsPause = viewData->isPaused.load(std::memory_order_acquire) ||
+                                       viewData->nativePauseApplied.load(std::memory_order_acquire);
+                if (hasUltralightFocus || ownsInputCapture || ownsPause) {
                     PerformUnfocusOperations(viewId, viewData);
                 }
 
@@ -157,7 +218,7 @@ namespace PrismaUI::ViewManager {
         std::shared_lock lock(viewsMutex);
         auto it = views.find(viewId);
         if (it != views.end()) {
-            return it->second->isHidden.load();
+            return it->second->isHidden.load() || it->second->isDestroying.load(std::memory_order_acquire);
         }
         logger::warn("IsHidden: View ID [{}] not found.", viewId);
         return true;
@@ -165,7 +226,8 @@ namespace PrismaUI::ViewManager {
 
     bool IsValid(const Core::PrismaViewId& viewId) {
         std::shared_lock lock(viewsMutex);
-        return views.find(viewId) != views.end();
+        auto it = views.find(viewId);
+        return it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire);
     }
 
     bool Focus(const Core::PrismaViewId& viewId, bool pauseGame, bool disableFocusMenu) {
@@ -174,84 +236,75 @@ namespace PrismaUI::ViewManager {
             return false;
         }
 
-        ViewOperationQueue::EnqueueOperation(viewId, [viewId, pauseGame, disableFocusMenu]() {
-            std::shared_ptr<PrismaView> viewData = nullptr;
-            {
-                std::shared_lock lock(viewsMutex);
-                auto it = views.find(viewId);
-                if (it != views.end()) {
-                    viewData = it->second;
-                }
-            }
-
-            if (!viewData || !viewData->ultralightView) {
-                logger::warn("Focus: View [{}] or its Ultralight View is not ready.", viewId);
-                return;
-            }
-
-            if (viewData->isHidden.load()) {
-                logger::warn("Focus: View [{}] is hidden, cannot focus.", viewId);
-                return;
-            }
-
-            if (viewData->ultralightView->HasFocus()) {
-                logger::debug("Focus: View [{}] already has focus.", viewId);
-                return;
-            }
-
-            // Unfocus other views
-            std::vector<Core::PrismaViewId> viewsToUnfocus;
-            {
-                std::shared_lock lock(viewsMutex);
-                for (const auto& pair : views) {
-                    if (pair.first != viewId && pair.second->ultralightView &&
-                        pair.second->ultralightView->HasFocus()) {
-                        viewsToUnfocus.push_back(pair.first);
+        if (!ViewOperationQueue::EnqueueOperation(viewId, [viewId, pauseGame, disableFocusMenu]() {
+                std::shared_ptr<PrismaView> viewData = nullptr;
+                {
+                    std::shared_lock lock(viewsMutex);
+                    auto it = views.find(viewId);
+                    if (it != views.end()) {
+                        viewData = it->second;
                     }
                 }
-            }
 
-            for (const auto& idToUnfocus : viewsToUnfocus) {
-                ViewOperationQueue::EnqueueOperation(idToUnfocus, [idToUnfocus]() {
-                    std::shared_ptr<PrismaView> vd = nullptr;
-                    {
-                        std::shared_lock lock(viewsMutex);
-                        auto it = views.find(idToUnfocus);
-                        if (it != views.end()) {
-                            vd = it->second;
+                if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) ||
+                    !viewData->ultralightView) {
+                    logger::warn("Focus: View [{}] or its Ultralight View is not ready.", viewId);
+                    return;
+                }
+
+                if (viewData->isHidden.load()) {
+                    logger::warn("Focus: View [{}] is hidden, cannot focus.", viewId);
+                    return;
+                }
+
+                if (viewData->ultralightView->HasFocus()) {
+                    PrismaUI::InputHandler::EnableInputCapture(viewId);
+                    if (disableFocusMenu) {
+                        FocusMenu::Close();
+                    } else {
+                        FocusMenu::Open();
+                    }
+                    QueueNativeFocusState(viewData, pauseGame);
+                    logger::debug("Focus: View [{}] already had Ultralight focus; native capture state refreshed.",
+                                  viewId);
+                    return;
+                }
+
+                // Unfocus other views immediately while already on the Ultralight worker. Deferring
+                // these into separate view queues left a window where two views could report focus and
+                // where the old view could be destroyed before native input state was restored.
+                std::vector<std::pair<Core::PrismaViewId, std::shared_ptr<PrismaView>>> viewsToUnfocus;
+                {
+                    std::shared_lock lock(viewsMutex);
+                    for (const auto& pair : views) {
+                        if (pair.first != viewId && pair.second && !pair.second->isDestroying.load() &&
+                            pair.second->ultralightView && pair.second->ultralightView->HasFocus()) {
+                            viewsToUnfocus.emplace_back(pair.first, pair.second);
                         }
                     }
-
-                    if (vd && vd->ultralightView) {
-                        // Don't close FocusMenu when switching focus between views
-                        PerformUnfocusOperations(idToUnfocus, vd, false);
-                        logger::debug("Unfocus: View [{}] unfocused (focus switching).", idToUnfocus);
-                    }
-                });
-            }
-
-            // Focus this view
-            viewData->ultralightView->Focus();
-            PrismaUI::InputHandler::EnableInputCapture(viewId);
-
-            if (!disableFocusMenu) {
-                FocusMenu::Open();
-            }
-
-            auto controlMap = RE::ControlMap::GetSingleton();
-            controlMap->SetIgnoreKeyboardMouse(true);
-
-            if (pauseGame) {
-                auto ui = RE::UI::GetSingleton();
-                if (ui) {
-                    ui->freezeFramePause++;
-                    viewData->isPaused.store(true);
-                    logger::debug("Game paused for View [{}]", viewId);
                 }
-            }
 
-            logger::debug("Focus: View [{}] focused successfully.", viewId);
-        });
+                for (const auto& [idToUnfocus, oldView] : viewsToUnfocus) {
+                    // If the incoming view has disabled FocusMenu, close the old modal menu as part
+                    // of the hand-off. Otherwise keep it open across the switch to avoid churn.
+                    PerformUnfocusOperations(idToUnfocus, oldView, disableFocusMenu);
+                    logger::debug("Unfocus: View [{}] unfocused during focus switch.", idToUnfocus);
+                }
+
+                viewData->ultralightView->Focus();
+                PrismaUI::InputHandler::EnableInputCapture(viewId);
+
+                if (disableFocusMenu) {
+                    FocusMenu::Close();
+                } else {
+                    FocusMenu::Open();
+                }
+
+                QueueNativeFocusState(viewData, pauseGame);
+                logger::debug("Focus: View [{}] focused successfully.", viewId);
+            })) {
+            return false;
+        }
 
         return true;
     }
@@ -274,27 +327,19 @@ namespace PrismaUI::ViewManager {
 
             if (!viewData) {
                 logger::warn("Unfocus: View [{}] not found during operation execution.", viewId);
-                PrismaUI::InputHandler::DisableInputCapture(0);
-                FocusMenu::Close();
-                return;
-            }
-
-            if (!viewData->ultralightView) {
-                logger::warn("Unfocus: View [{}] Ultralight View is not ready.", viewId);
-                if (viewData->isPaused.load()) {
-                    auto ui = RE::UI::GetSingleton();
-                    if (ui && ui->freezeFramePause > 0) {
-                        ui->freezeFramePause--;
-                    }
-                    viewData->isPaused.store(false);
-                }
                 PrismaUI::InputHandler::DisableInputCapture(viewId);
                 FocusMenu::Close();
+                QueueNativeInputStateRefresh();
                 return;
             }
 
-            if (!viewData->ultralightView->HasFocus()) {
-                logger::debug("Unfocus: View [{}] does not have focus.", viewId);
+            const bool hasUltralightFocus = viewData->ultralightView && viewData->ultralightView->HasFocus();
+            const bool ownsInputCapture = PrismaUI::InputHandler::IsInputCaptureActiveForView(viewId);
+            const bool ownsPause = viewData->isPaused.load(std::memory_order_acquire) ||
+                                   viewData->nativePauseApplied.load(std::memory_order_acquire);
+
+            if (!hasUltralightFocus && !ownsInputCapture && !ownsPause) {
+                logger::debug("Unfocus: View [{}] has no remaining focus/capture state.", viewId);
                 return;
             }
 
@@ -313,7 +358,7 @@ namespace PrismaUI::ViewManager {
             }
         }
 
-        if (viewData) {
+        if (viewData && !viewData->isDestroying.load(std::memory_order_acquire)) {
             auto future = ultralightThread.submit(
                 [view_ptr = viewData->ultralightView]() -> bool { return view_ptr ? view_ptr->HasFocus() : false; });
             try {
@@ -338,7 +383,7 @@ namespace PrismaUI::ViewManager {
             }
         }
 
-        if (viewData && viewData->ultralightView) {
+        if (viewData && !viewData->isDestroying.load(std::memory_order_acquire) && viewData->ultralightView) {
             auto future = ultralightThread.submit([view_ptr = viewData->ultralightView]() -> bool {
                 if (view_ptr) {
                     return view_ptr->HasInputFocus();
@@ -358,7 +403,7 @@ namespace PrismaUI::ViewManager {
     void SetScrollingPixelSize(const Core::PrismaViewId& viewId, int pixelSize) {
         std::unique_lock lock(viewsMutex);
         auto it = views.find(viewId);
-        if (it != views.end()) {
+        if (it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire)) {
             if (pixelSize <= 0) {
                 logger::warn("SetScrollingPixelSize: Invalid pixel size {} for view [{}]. Must be > 0. Using default.",
                              pixelSize, viewId);
@@ -375,7 +420,7 @@ namespace PrismaUI::ViewManager {
     int GetScrollingPixelSize(const Core::PrismaViewId& viewId) {
         std::shared_lock lock(viewsMutex);
         auto it = views.find(viewId);
-        if (it != views.end()) {
+        if (it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire)) {
             return it->second->scrollingPixelSize;
         }
         logger::warn("GetScrollingPixelSize: View ID [{}] not found, returning default.", viewId);
@@ -385,64 +430,38 @@ namespace PrismaUI::ViewManager {
     void Destroy(const Core::PrismaViewId& viewId) {
         logger::info("Destroy: Beginning destruction of View [{}]", viewId);
 
-        if (!ViewManager::IsValid(viewId)) {
-            logger::warn("Destroy: View ID [{}] not found.", viewId);
-            return;
-        }
-
-        // Clear pending operations for this view to prevent execution after destruction
-        ViewOperationQueue::ClearOperations(viewId);
-        logger::debug("Destroy: Cleared pending operations for View [{}]", viewId);
-
-        if (HasFocus(viewId)) {
-            logger::debug("Destroy: View [{}] has focus, unfocusing first.", viewId);
-            Unfocus(viewId);
-        }
-
         std::shared_ptr<PrismaView> viewDataToDestroy = nullptr;
         {
             std::unique_lock lock(viewsMutex);
             auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewDataToDestroy = std::move(it->second);
-                views.erase(it);
-                logger::debug("Destroy: Removed View [{}] from views map", viewId);
-            } else {
-                logger::warn("Destroy: View ID [{}] not found after checking validity.", viewId);
+            if (it == views.end() || !it->second) {
+                logger::warn("Destroy: View ID [{}] not found.", viewId);
                 return;
             }
+
+            viewDataToDestroy = it->second;
+            bool expected = false;
+            if (!viewDataToDestroy->isDestroying.compare_exchange_strong(expected, true,
+                                                                         std::memory_order_acq_rel)) {
+                logger::debug("Destroy: View [{}] is already being destroyed.", viewId);
+                return;
+            }
+            viewDataToDestroy->isHidden.store(true, std::memory_order_release);
         }
 
-        viewDataToDestroy->isHidden = true;
-        logger::debug("Destroy: Marked View [{}] as hidden", viewId);
+        // Once destruction begins no new view operations are accepted. Clear anything that has not
+        // started yet, then perform the final unfocus directly on the Ultralight worker using the
+        // captured shared_ptr. This guarantees native input cleanup happens before the map entry can
+        // disappear, instead of enqueueing Unfocus() and immediately invalidating it.
+        ViewOperationQueue::ClearOperations(viewId);
+        logger::debug("Destroy: Cleared pending operations for View [{}]", viewId);
 
-        {
-            std::lock_guard<std::mutex> lock(jsCallbacksMutex);
-            logger::debug("Destroy: Removing JavaScript callbacks for View [{}]", viewId);
-
-            auto it = jsCallbacks.begin();
-            size_t removedCallbacks = 0;
-
-            while (it != jsCallbacks.end()) {
-                if (it->first.first == viewId) {
-                    it = jsCallbacks.erase(it);
-                    removedCallbacks++;
-                } else {
-                    ++it;
-                }
-            }
-
-            if (removedCallbacks > 0) {
-                logger::debug("Destroy: Removed {} JavaScript callback(s) for View [{}]", removedCallbacks, viewId);
-            }
-        }
-
-        logger::debug("Destroy: Cleaning up Ultralight resources (on UI thread) for View [{}]", viewId);
-        auto ultralightCleanupFuture = ultralightThread.submit([viewId, viewData = viewDataToDestroy]() {
+        auto cleanupUltralight = [viewId, viewData = viewDataToDestroy]() {
             try {
                 logger::debug("Destroy: Beginning Ultralight resources cleanup for View [{}]", viewId);
 
-                // Clean up inspector resources first
+                PerformUnfocusOperations(viewId, viewData);
+
                 if (viewData->inspectorView) {
                     logger::debug("Destroy: Releasing inspector view for View [{}]", viewId);
                     viewData->inspectorView = nullptr;
@@ -475,7 +494,6 @@ namespace PrismaUI::ViewManager {
                 viewData->newFrameReady = false;
 
                 logger::debug("Destroy: Ultralight resources for View [{}] cleaned up successfully", viewId);
-
                 return true;
             } catch (const std::exception& e) {
                 logger::error("Destroy: Exception during Ultralight resource cleanup for View [{}]: {}", viewId,
@@ -485,17 +503,51 @@ namespace PrismaUI::ViewManager {
                 logger::error("Destroy: Unknown exception during Ultralight resource cleanup for View [{}]", viewId);
                 return false;
             }
-        });
+        };
 
+        bool ultralightSuccess = false;
         try {
-            bool ultralight_success = ultralightCleanupFuture.get();
-            if (ultralight_success) {
-                logger::debug("Destroy: Ultralight resources cleanup completed successfully for View [{}]", viewId);
+            if (ultralightThread.IsWorkerThread()) {
+                ultralightSuccess = cleanupUltralight();
             } else {
-                logger::warn("Destroy: Ultralight resources cleanup reported failure for View [{}]", viewId);
+                ultralightSuccess = ultralightThread.submit(cleanupUltralight).get();
             }
         } catch (const std::exception& e) {
             logger::error("Destroy: Exception waiting for Ultralight cleanup for View [{}]: {}", viewId, e.what());
+        }
+
+        if (!ultralightSuccess) {
+            logger::warn("Destroy: Ultralight resources cleanup reported failure for View [{}]", viewId);
+        }
+
+        {
+            std::unique_lock lock(viewsMutex);
+            auto it = views.find(viewId);
+            if (it != views.end() && it->second.get() == viewDataToDestroy.get()) {
+                views.erase(it);
+                logger::debug("Destroy: Removed View [{}] from views map", viewId);
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(jsCallbacksMutex);
+            logger::debug("Destroy: Removing JavaScript callbacks for View [{}]", viewId);
+
+            auto it = jsCallbacks.begin();
+            size_t removedCallbacks = 0;
+
+            while (it != jsCallbacks.end()) {
+                if (it->first.first == viewId) {
+                    it = jsCallbacks.erase(it);
+                    removedCallbacks++;
+                } else {
+                    ++it;
+                }
+            }
+
+            if (removedCallbacks > 0) {
+                logger::debug("Destroy: Removed {} JavaScript callback(s) for View [{}]", removedCallbacks, viewId);
+            }
         }
 
         bool hasD3DResources = (viewDataToDestroy->texture != nullptr || viewDataToDestroy->textureView != nullptr);
@@ -531,7 +583,7 @@ namespace PrismaUI::ViewManager {
     void SetOrder(const Core::PrismaViewId& viewId, int order) {
         std::unique_lock lock(viewsMutex);
         auto it = views.find(viewId);
-        if (it != views.end()) {
+        if (it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire)) {
             it->second->order = order;
             logger::debug("SetOrder: Set order {} for view [{}]", order, viewId);
         } else {
@@ -542,7 +594,7 @@ namespace PrismaUI::ViewManager {
     int GetOrder(const Core::PrismaViewId& viewId) {
         std::shared_lock lock(viewsMutex);
         auto it = views.find(viewId);
-        if (it != views.end()) {
+        if (it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire)) {
             return it->second->order;
         }
         logger::warn("GetOrder: View ID [{}] not found, returning -1.", viewId);
@@ -569,7 +621,8 @@ namespace PrismaUI::ViewManager {
         {
             std::shared_lock lock(viewsMutex);
             for (const auto& pair : views) {
-                if (pair.second && pair.second->ultralightView) {
+                if (pair.second && !pair.second->isDestroying.load(std::memory_order_acquire) &&
+                    pair.second->ultralightView) {
                     viewPtrs.push_back(pair.second->ultralightView);
                 }
             }
@@ -601,7 +654,7 @@ namespace PrismaUI::ViewManager {
                                  std::function<void(Core::PrismaViewId, PRISMA_UI_API::ConsoleMessageLevel, const std::string&)> callback) {
         std::unique_lock lock(viewsMutex);
         auto it = views.find(viewId);
-        if (it != views.end() && it->second) {
+        if (it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire)) {
             it->second->consoleMessageCallback = std::move(callback);
         } else {
             logger::warn("RegisterConsoleCallback: View ID [{}] not found.", viewId);
@@ -611,7 +664,7 @@ namespace PrismaUI::ViewManager {
     void RegisterTranslations(const Core::PrismaViewId& viewId, const std::string& pluginName) {
         std::unique_lock lock(viewsMutex);
         auto it = views.find(viewId);
-        if (it != views.end() && it->second) {
+        if (it != views.end() && it->second && !it->second->isDestroying.load(std::memory_order_acquire)) {
             it->second->translationPluginName = pluginName;
             logger::info("RegisterTranslations: View [{}] registered translations for '{}'", viewId, pluginName);
         } else {
@@ -628,7 +681,7 @@ namespace PrismaUI::ViewManager {
             std::shared_lock lock(viewsMutex);
             snapshot.reserve(views.size());
             for (const auto& [id, viewData] : views) {
-                if (!viewData) continue;
+                if (!viewData || viewData->isDestroying.load(std::memory_order_acquire)) continue;
                 // Strip the "file:///views/" prefix to expose the original relative path.
                 std::string path = viewData->originalUrl;
                 constexpr std::string_view kPrefix = "file:///views/";

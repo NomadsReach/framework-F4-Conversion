@@ -1,6 +1,8 @@
 #include "ViewRenderer.h"
 
 #include <DirectXTK/SimpleMath.h>
+#include <algorithm>
+#include <cstring>
 
 #include "Core.h"
 #include "InputHandler.h"
@@ -301,7 +303,8 @@ namespace PrismaUI::ViewRenderer {
         {
             std::shared_lock lock(viewsMutex);
             viewsToDraw.reserve(views.size());
-            for (const auto& [viewId, viewData] : views) {
+            for (const auto& pair : views) {
+                const auto& viewData = pair.second;
                 if (viewData && !viewData->isDestroying.load(std::memory_order_acquire) &&
                     !viewData->isHidden.load() && !viewData->pendingResourceRelease.load() && viewData->textureView) {
                     viewsToDraw.push_back(viewData);

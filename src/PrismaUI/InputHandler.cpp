@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <commctrl.h>
+#include <cstddef>
+#include <cstdio>
 #include <type_traits>
 #include <vector>
 #include <windowsx.h>
@@ -17,6 +19,8 @@ namespace PrismaUI::InputHandler {
     using namespace Core;
 
     namespace {
+        using MouseButton = decltype(ultralight::MouseEvent::kButton_Left);
+
         struct QueuedInputEvent {
             Core::PrismaViewId viewId = 0;
             InputEvent event;
@@ -129,8 +133,8 @@ namespace PrismaUI::InputHandler {
         return std::to_integer<std::uint8_t>(viewData->pixelBuffer[offset]) >= 12;
     }
 
-    static bool HandleMouseButtonDown(Core::PrismaViewId viewId, size_t stateIndex,
-                                      ultralight::MouseEvent::Button button, int x, int y) {
+    static bool HandleMouseButtonDown(Core::PrismaViewId viewId, size_t stateIndex, MouseButton button, int x,
+                                      int y) {
         const bool wasAnyButtonDown = AnyMouseButtonDown();
         g_mouseButtonStates[stateIndex] = true;
         if (!wasAnyButtonDown) {
@@ -149,8 +153,7 @@ namespace PrismaUI::InputHandler {
         return true;
     }
 
-    static bool HandleMouseButtonUp(Core::PrismaViewId viewId, size_t stateIndex,
-                                    ultralight::MouseEvent::Button button, int x, int y) {
+    static bool HandleMouseButtonUp(Core::PrismaViewId viewId, size_t stateIndex, MouseButton button, int x, int y) {
         g_mouseButtonStates[stateIndex] = false;
         const bool capture = g_pointerDragOwnedByUI;
         if (capture) {
@@ -1026,8 +1029,8 @@ namespace PrismaUI::InputHandler {
                         return;
                     }
 
-                    RefPtr<View> mainView = viewData->ultralightView;
-                    RefPtr<View> inspectorView = viewData->inspectorView;
+                    ultralight::RefPtr<ultralight::View> mainView = viewData->ultralightView;
+                    ultralight::RefPtr<ultralight::View> inspectorView = viewData->inspectorView;
 
                     for (const auto& event : events) {
                         if (viewData->isDestroying.load(std::memory_order_acquire) ||

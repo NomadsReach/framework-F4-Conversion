@@ -23,7 +23,7 @@ add_requires("directxtk")
 
 local PRISMA_TARGET = string.lower(os.getenv("PRISMA_TARGET") or "ng")
 if PRISMA_TARGET ~= "og" and PRISMA_TARGET ~= "ng" and PRISMA_TARGET ~= "vr" then
-    os.raise("PRISMA_TARGET must be one of: og, ng, vr")
+    os.raise("PRISMA_TARGET must be one of: og, ng, or vr")
 end
 
 if PRISMA_TARGET == "vr" then
@@ -50,6 +50,7 @@ if not os.isdir(UL_INCLUDE) then
     os.exit(1)
 end
 
+do
 if PRISMA_TARGET == "vr" then
     includes("ports/fo4vr")
 else
@@ -143,8 +144,7 @@ target("PrismaUI_F4")
         if mods_path then
             local mod_root = path.join(mods_path, "PrismaUI_F4")
             local plugins_dir = path.join(mod_root, "F4SE", "Plugins")
-            os.mkdir(plugins_dir)  -- Ensure directory exists
-            -- Copy DLL with explicit .dll extension (target:filename() already has .dll)
+            os.mkdir(plugins_dir)
             local dll_dest = path.join(plugins_dir, target:filename())
             os.cp(target:targetfile(), dll_dest)
             print("Deployed DLL to " .. dll_dest)
@@ -177,4 +177,5 @@ target("PrismaUI-F4-Example-Plugin")
     after_build(function(target)
         print("[PrismaUI-F4-Example] built to: " .. target:targetfile())
     end)
+end
 end

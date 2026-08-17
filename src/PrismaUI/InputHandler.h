@@ -7,6 +7,7 @@
 #include <Ultralight/Ultralight.h>
 #pragma warning(pop)
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <shared_mutex>

@@ -4,34 +4,33 @@
 #include <vector>
 #include <windows.h>
 
-inline bool isValidUTF8(const char* str)
-{
+inline bool isValidUTF8(const char* str) {
     if (!str) {
         return true;
     }
-    int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str, -1, NULL, 0);
+    int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str, -1, nullptr, 0);
     return len != 0;
 }
 
-inline std::string convertFromANSIToUTF8(const char* str)
-{
+inline std::string convertFromANSIToUTF8(const char* str) {
     if (!str) {
         return "";
     }
 
-    int wide_char_len = MultiByteToWideChar(CP_ACP, 0, str, -1, NULL, 0);
-    if (wide_char_len == 0) {
-        return "";  // Conversion failed - return empty rather than invalid encoding
+    int wideCharLen = MultiByteToWideChar(CP_ACP, 0, str, -1, nullptr, 0);
+    if (wideCharLen == 0) {
+        return "";
     }
-    std::vector<wchar_t> wide_char_buffer(wide_char_len);
-    MultiByteToWideChar(CP_ACP, 0, str, -1, wide_char_buffer.data(), wide_char_len);
 
-    int utf8_len = WideCharToMultiByte(CP_UTF8, 0, wide_char_buffer.data(), -1, NULL, 0, NULL, NULL);
-    if (utf8_len == 0) {
-        return "";  // Conversion failed - return empty rather than invalid encoding
+    std::vector<wchar_t> wideCharBuffer(wideCharLen);
+    MultiByteToWideChar(CP_ACP, 0, str, -1, wideCharBuffer.data(), wideCharLen);
+
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wideCharBuffer.data(), -1, nullptr, 0, nullptr, nullptr);
+    if (utf8Len == 0) {
+        return "";
     }
-    std::vector<char> utf8_buffer(utf8_len);
-    WideCharToMultiByte(CP_UTF8, 0, wide_char_buffer.data(), -1, utf8_buffer.data(), utf8_len, NULL, NULL);
 
-    return std::string(utf8_buffer.data());
+    std::vector<char> utf8Buffer(utf8Len);
+    WideCharToMultiByte(CP_UTF8, 0, wideCharBuffer.data(), -1, utf8Buffer.data(), utf8Len, nullptr, nullptr);
+    return std::string(utf8Buffer.data());
 }

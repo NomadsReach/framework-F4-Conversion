@@ -38,25 +38,15 @@ namespace PrismaUI::ViewManager {
     int GetScrollingPixelSize(const Core::PrismaViewId& viewId);
     void SetOrder(const Core::PrismaViewId& viewId, int order);
     int GetOrder(const Core::PrismaViewId& viewId);
-
-    // Inspector View functions
     void CreateInspectorView(const Core::PrismaViewId& viewId);
     void SetInspectorVisibility(const Core::PrismaViewId& viewId, bool visible);
     bool IsInspectorVisible(const Core::PrismaViewId& viewId);
     void SetInspectorBounds(const Core::PrismaViewId& viewId, float topLeftX, float topLeftY, uint32_t width,
                             uint32_t height);
     bool HasAnyActiveFocus();
-
-    // Console message callback registration
-    void RegisterConsoleCallback(const Core::PrismaViewId& viewId,
-                                 std::function<void(Core::PrismaViewId, PRISMA_UI_API::ConsoleMessageLevel, const std::string&)> callback);
-
-    // Translations — inject window.L10N / window.t before page scripts run.
-    // pluginName is the bare plugin name matching the translation filename, e.g. "MyPlugin_F4".
+    void RegisterConsoleCallback(
+        const Core::PrismaViewId& viewId,
+        std::function<void(Core::PrismaViewId, PRISMA_UI_API::ConsoleMessageLevel, const std::string&)> callback);
     void RegisterTranslations(const Core::PrismaViewId& viewId, const std::string& pluginName);
-
-    // Enumerate all currently-registered views. Callback receives (id, htmlPath) for each view,
-    // where htmlPath is the original relative path passed to Create (e.g., "debug_panel.html").
-    // Snapshot is taken under the shared lock; callback is invoked outside the lock.
     void EnumerateViews(std::function<void(Core::PrismaViewId, const std::string&)> callback);
 }

@@ -1,13 +1,14 @@
 #include "ViewRenderer.h"
 
+#include <DirectXTK/SimpleMath.h>
+
 #include "Core.h"
 #include "InputHandler.h"
 #include "Inspector.h"
 
-#include <DirectXTK/SimpleMath.h>
-
 namespace PrismaUI::ViewRenderer {
     using namespace Core;
+
     void UpdateLogic() {
         if (renderer) {
             renderer->Update();
@@ -15,20 +16,21 @@ namespace PrismaUI::ViewRenderer {
     }
 
     void RenderViews() {
-        if (!renderer) return;
+        if (!renderer) {
+            return;
+        }
 
-        std::vector<std::shared_ptr<Core::PrismaView>> viewsToRender;
+        std::vector<std::shared_ptr<PrismaView>> viewsToRender;
         {
             std::shared_lock lock(viewsMutex);
             viewsToRender.reserve(views.size());
-            for (const auto& pair : views) {
-                const auto& viewPtr = pair.second;
-                if (!viewPtr) {
-                    logger::warn("RenderViews: Found null shared_ptr in views map for ID [{}]", pair.first);
+            for (const auto& [viewId, viewData] : views) {
+                if (!viewData) {
+                    logger::warn("RenderViews: Found null shared_ptr in views map for ID [{}]", viewId);
                     continue;
                 }
-                if (!viewPtr->isHidden.load()) {
-                    viewsToRender.push_back(viewPtr);
+                if (!viewData->isDestroying.load(std::memory_order_acquire) && !viewData->isHidden.load()) {
+                    viewsToRender.push_back(viewData);
                 }
             }
         }
@@ -38,15 +40,18 @@ namespace PrismaUI::ViewRenderer {
         }
     }
 
-    void RenderSingleView(std::shared_ptr<Core::PrismaView> viewData) {
-        if (!viewData || !viewData->ultralightView) return;
+    void RenderSingleView(std::shared_ptr<PrismaView> viewData) {
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) || !viewData->ultralightView) {
+            return;
+        }
 
-        Surface* surface_base = viewData->ultralightView->surface();
-        if (!surface_base) return;
+        Surface* surfaceBase = viewData->ultralightView->surface();
+        if (!surfaceBase) {
+            return;
+        }
 
-        BitmapSurface* surface = static_cast<BitmapSurface*>(surface_base);
-
-        if (viewData->isLoadingFinished && !surface->dirty_bounds().IsEmpty()) {
+        auto* surface = static_cast<BitmapSurface*>(surfaceBase);
+        if (viewData->isLoadingFinished.load() && !surface->dirty_bounds().IsEmpty()) {
             CopyBitmapToBuffer(viewData);
             surface->ClearDirtyBounds();
         }
@@ -54,12 +59,21 @@ namespace PrismaUI::ViewRenderer {
         Inspector::RenderInspectorView(viewData);
     }
 
-    void CopyBitmapToBuffer(std::shared_ptr<Core::PrismaView> viewData) {
-        if (!viewData || !viewData->ultralightView) return;
-        BitmapSurface* surface = static_cast<BitmapSurface*>(viewData->ultralightView->surface());
-        if (!surface) return;
+    void CopyBitmapToBuffer(std::shared_ptr<PrismaView> viewData) {
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) || !viewData->ultralightView) {
+            return;
+        }
+
+        Surface* surfaceBase = viewData->ultralightView->surface();
+        if (!surfaceBase) {
+            return;
+        }
+
+        auto* surface = static_cast<BitmapSurface*>(surfaceBase);
         RefPtr<Bitmap> bitmap = surface->bitmap();
-        if (!bitmap) return;
+        if (!bitmap) {
+            return;
+        }
 
         void* pixels = bitmap->LockPixels();
         if (!pixels) {
@@ -67,11 +81,11 @@ namespace PrismaUI::ViewRenderer {
             return;
         }
 
-        uint32_t width = bitmap->width();
-        uint32_t height = bitmap->height();
-        uint32_t stride = bitmap->row_bytes();
-        size_t required_size = static_cast<size_t>(height) * stride;
-        if (width == 0 || height == 0 || required_size == 0) {
+        const uint32_t width = bitmap->width();
+        const uint32_t height = bitmap->height();
+        const uint32_t stride = bitmap->row_bytes();
+        const size_t requiredSize = static_cast<size_t>(height) * stride;
+        if (width == 0 || height == 0 || requiredSize == 0) {
             bitmap->UnlockPixels();
             return;
         }
@@ -79,32 +93,36 @@ namespace PrismaUI::ViewRenderer {
         bool success = false;
         {
             std::lock_guard lock(viewData->bufferMutex);
-            try {
-                if (viewData->pixelBuffer.size() != required_size) {
-                    viewData->pixelBuffer.resize(required_size);
+            if (!viewData->isDestroying.load(std::memory_order_acquire)) {
+                try {
+                    if (viewData->pixelBuffer.size() != requiredSize) {
+                        viewData->pixelBuffer.resize(requiredSize);
+                    }
+                    std::memcpy(viewData->pixelBuffer.data(), pixels, requiredSize);
+                    viewData->bufferWidth = width;
+                    viewData->bufferHeight = height;
+                    viewData->bufferStride = stride;
+                    success = true;
+                } catch (const std::exception& e) {
+                    logger::error("View [{}]: Exception during pixel buffer copy/resize: {}", viewData->id,
+                                  e.what());
+                    viewData->pixelBuffer.clear();
+                    viewData->pixelBuffer.shrink_to_fit();
+                    viewData->bufferWidth = 0;
+                    viewData->bufferHeight = 0;
+                    viewData->bufferStride = 0;
                 }
-                memcpy(viewData->pixelBuffer.data(), pixels, required_size);
-                viewData->bufferWidth = width;
-                viewData->bufferHeight = height;
-                viewData->bufferStride = stride;
-                success = true;
-            } catch (const std::exception& e) {
-                logger::error("View [{}]: Exception during pixel buffer copy/resize: {}", viewData->id, e.what());
-                viewData->pixelBuffer.clear();
-                viewData->pixelBuffer.shrink_to_fit();
-                viewData->bufferWidth = viewData->bufferHeight = viewData->bufferStride = 0;
             }
         }
 
         bitmap->UnlockPixels();
-        if (success)
-            viewData->newFrameReady = true;
-        else
-            viewData->newFrameReady = false;
+        viewData->newFrameReady.store(success && !viewData->isDestroying.load(std::memory_order_acquire));
     }
 
-    void ReleaseViewTexture(Core::PrismaView* viewData) {
-        if (!viewData) return;
+    void ReleaseViewTexture(PrismaView* viewData) {
+        if (!viewData) {
+            return;
+        }
 
         if (viewData->textureView) {
             viewData->textureView->Release();
@@ -118,75 +136,78 @@ namespace PrismaUI::ViewRenderer {
         viewData->textureHeight = 0;
     }
 
-    void UpdateSingleTextureFromBuffer(std::shared_ptr<Core::PrismaView> viewData) {
-        if (!viewData) return;
-
-        if (viewData->pendingResourceRelease.load()) {
-            ReleaseViewTexture(viewData.get());
-            Inspector::ReleaseInspectorTexture(viewData.get());
-            viewData->pendingResourceRelease = false;
+    void UpdateSingleTextureFromBuffer(std::shared_ptr<PrismaView> viewData) {
+        if (!viewData) {
             return;
         }
 
-        const bool mainFrameReady = viewData->newFrameReady.exchange(false);
-        if (mainFrameReady) {
+        if (viewData->pendingResourceRelease.exchange(false)) {
+            ReleaseViewTexture(viewData.get());
+            Inspector::ReleaseInspectorTexture(viewData.get());
+        }
+
+        if (viewData->isDestroying.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        if (viewData->newFrameReady.exchange(false)) {
             std::lock_guard lock(viewData->bufferMutex);
-            if (!viewData->pixelBuffer.empty() && viewData->bufferWidth > 0 && viewData->bufferHeight > 0) {
+            if (!viewData->isDestroying.load(std::memory_order_acquire) && !viewData->pixelBuffer.empty() &&
+                viewData->bufferWidth > 0 && viewData->bufferHeight > 0) {
                 CopyPixelsToTexture(viewData.get(), viewData->pixelBuffer.data(), viewData->bufferWidth,
                                     viewData->bufferHeight, viewData->bufferStride);
             }
         }
 
-        // Inspector texture updated independently
         if (viewData->inspectorVisible.load() && viewData->inspectorFrameReady.exchange(false)) {
             std::lock_guard inspectorLock(viewData->inspectorBufferMutex);
-            if (!viewData->inspectorPixelBuffer.empty() && viewData->inspectorBufferWidth > 0 &&
+            if (!viewData->isDestroying.load(std::memory_order_acquire) &&
+                !viewData->inspectorPixelBuffer.empty() && viewData->inspectorBufferWidth > 0 &&
                 viewData->inspectorBufferHeight > 0) {
                 Inspector::CopyInspectorPixelsToTexture(viewData.get(), viewData->inspectorPixelBuffer.data(),
-                                                        viewData->inspectorBufferWidth, viewData->inspectorBufferHeight,
+                                                        viewData->inspectorBufferWidth,
+                                                        viewData->inspectorBufferHeight,
                                                         viewData->inspectorBufferStride);
             }
         }
     }
 
-    void CopyPixelsToTexture(Core::PrismaView* viewData, void* pixels, uint32_t width, uint32_t height,
-                             uint32_t stride) {
-        if (!viewData || !d3dDevice || !d3dContext || !pixels || width == 0 || height == 0) return;
+    void CopyPixelsToTexture(PrismaView* viewData, void* pixels, uint32_t width, uint32_t height, uint32_t stride) {
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) || !d3dDevice || !d3dContext ||
+            !pixels || width == 0 || height == 0) {
+            return;
+        }
 
         if (!viewData->texture || viewData->textureWidth != width || viewData->textureHeight != height) {
             logger::debug("View [{}]: Creating/Recreating texture ({}x{})", viewData->id, width, height);
             ReleaseViewTexture(viewData);
-            D3D11_TEXTURE2D_DESC desc;
-            ZeroMemory(&desc, sizeof(desc));
-            desc.Width = width;
-            desc.Height = height;
-            desc.MipLevels = 1;
-            desc.ArraySize = 1;
-            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-            desc.SampleDesc.Count = 1;
-            desc.Usage = D3D11_USAGE_DYNAMIC;
-            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
-            HRESULT hr = d3dDevice->CreateTexture2D(&desc, nullptr, &viewData->texture);
+            D3D11_TEXTURE2D_DESC textureDesc = {};
+            textureDesc.Width = width;
+            textureDesc.Height = height;
+            textureDesc.MipLevels = 1;
+            textureDesc.ArraySize = 1;
+            textureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            textureDesc.SampleDesc.Count = 1;
+            textureDesc.Usage = D3D11_USAGE_DYNAMIC;
+            textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            textureDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
-            if (FAILED(hr)) {
-                logger::critical("View [{}]: Failed to create texture! HR={:#X}", viewData->id, hr);
+            HRESULT result = d3dDevice->CreateTexture2D(&textureDesc, nullptr, &viewData->texture);
+            if (FAILED(result)) {
+                logger::critical("View [{}]: Failed to create texture! HR={:#X}", viewData->id, result);
                 ReleaseViewTexture(viewData);
                 return;
             }
 
-            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
-            ZeroMemory(&srvDesc, sizeof(srvDesc));
+            D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc = {};
+            viewDesc.Format = textureDesc.Format;
+            viewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            viewDesc.Texture2D.MipLevels = 1;
 
-            srvDesc.Format = desc.Format;
-            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-            srvDesc.Texture2D.MipLevels = 1;
-
-            hr = d3dDevice->CreateShaderResourceView(viewData->texture, &srvDesc, &viewData->textureView);
-
-            if (FAILED(hr)) {
-                logger::critical("View [{}]: Failed to create SRV! HR={:#X}", viewData->id, hr);
+            result = d3dDevice->CreateShaderResourceView(viewData->texture, &viewDesc, &viewData->textureView);
+            if (FAILED(result)) {
+                logger::critical("View [{}]: Failed to create SRV! HR={:#X}", viewData->id, result);
                 ReleaseViewTexture(viewData);
                 return;
             }
@@ -196,36 +217,41 @@ namespace PrismaUI::ViewRenderer {
             logger::debug("View [{}]: Texture/SRV created/resized.", viewData->id);
         }
 
-        D3D11_MAPPED_SUBRESOURCE mappedResource;
-        HRESULT hr = d3dContext->Map(viewData->texture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource);
-        if (FAILED(hr)) {
-            logger::error("View [{}]: Failed to map texture! HR={:#X}", viewData->id, hr);
+        if (viewData->isDestroying.load(std::memory_order_acquire)) {
             return;
         }
 
-        std::byte* source = static_cast<std::byte*>(pixels);
-        std::byte* dest = static_cast<std::byte*>(mappedResource.pData);
-        uint32_t destPitch = mappedResource.RowPitch;
+        D3D11_MAPPED_SUBRESOURCE mappedResource = {};
+        HRESULT result = d3dContext->Map(viewData->texture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource);
+        if (FAILED(result)) {
+            logger::error("View [{}]: Failed to map texture! HR={:#X}", viewData->id, result);
+            return;
+        }
 
-        if (destPitch == stride) {
-            memcpy(dest, source, (size_t)height * stride);
+        auto* source = static_cast<std::byte*>(pixels);
+        auto* destination = static_cast<std::byte*>(mappedResource.pData);
+        const uint32_t destinationPitch = mappedResource.RowPitch;
+
+        if (destinationPitch == stride) {
+            std::memcpy(destination, source, static_cast<size_t>(height) * stride);
         } else {
-            for (uint32_t y = 0; y < height; ++y) memcpy(dest + y * destPitch, source + y * stride, stride);
+            for (uint32_t row = 0; row < height; ++row) {
+                std::memcpy(destination + row * destinationPitch, source + row * stride, stride);
+            }
         }
 
         d3dContext->Unmap(viewData->texture, 0);
     }
 
     void DrawCursor() {
-        if (!spriteBatch || !commonStates || !cursorTexture) {
+        if (!spriteBatch || !commonStates || !cursorTexture || !d3dContext) {
+            return;
+        }
+        if (!InputHandler::IsAnyInputCaptureActive()) {
             return;
         }
 
-        if (!PrismaUI::InputHandler::IsAnyInputCaptureActive()) {
-            return;
-        }
-
-        // Engine continuously restores cursor visibility when unpaused, so hide every frame
+        // Fallout 4 restores cursor visibility while unpaused, so suppress the engine cursor every frame.
         auto ui = RE::UI::GetSingleton();
         if (ui) {
             auto cursorMenu = ui->GetMenu("CursorMenu");
@@ -235,7 +261,7 @@ namespace PrismaUI::ViewRenderer {
         }
 
         ID3D11BlendState* backupBlendState = nullptr;
-        FLOAT backupBlendFactor[4];
+        FLOAT backupBlendFactor[4] = {};
         UINT backupSampleMask = 0;
         ID3D11DepthStencilState* backupDepthStencilState = nullptr;
         UINT backupStencilRef = 0;
@@ -246,71 +272,83 @@ namespace PrismaUI::ViewRenderer {
         d3dContext->RSGetState(&backupRasterizerState);
 
         spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, commonStates->AlphaBlend());
-
-        DirectX::SimpleMath::Vector2 position(
-            static_cast<float>(PrismaUI::InputHandler::GetLastCursorX()),
-            static_cast<float>(PrismaUI::InputHandler::GetLastCursorY()));
+        DirectX::SimpleMath::Vector2 position(static_cast<float>(InputHandler::GetLastCursorX()),
+                                              static_cast<float>(InputHandler::GetLastCursorY()));
         spriteBatch->Draw(cursorTexture.Get(), position);
-
         spriteBatch->End();
 
         d3dContext->OMSetBlendState(backupBlendState, backupBlendFactor, backupSampleMask);
         d3dContext->OMSetDepthStencilState(backupDepthStencilState, backupStencilRef);
         d3dContext->RSSetState(backupRasterizerState);
 
-        if (backupBlendState) backupBlendState->Release();
-        if (backupDepthStencilState) backupDepthStencilState->Release();
-        if (backupRasterizerState) backupRasterizerState->Release();
+        if (backupBlendState) {
+            backupBlendState->Release();
+        }
+        if (backupDepthStencilState) {
+            backupDepthStencilState->Release();
+        }
+        if (backupRasterizerState) {
+            backupRasterizerState->Release();
+        }
     }
 
     void DrawViews() {
-        if (!spriteBatch || !commonStates) return;
+        if (!spriteBatch || !commonStates || !d3dContext) {
+            return;
+        }
 
-        std::vector<std::shared_ptr<Core::PrismaView>> viewsToDraw;
+        std::vector<std::shared_ptr<PrismaView>> viewsToDraw;
         {
             std::shared_lock lock(viewsMutex);
             viewsToDraw.reserve(views.size());
-            for (const auto& pair : views) {
-                if (pair.second && !pair.second->isHidden.load() && !pair.second->pendingResourceRelease.load() &&
-                    pair.second->textureView) {
-                    viewsToDraw.push_back(pair.second);
+            for (const auto& [viewId, viewData] : views) {
+                if (viewData && !viewData->isDestroying.load(std::memory_order_acquire) &&
+                    !viewData->isHidden.load() && !viewData->pendingResourceRelease.load() && viewData->textureView) {
+                    viewsToDraw.push_back(viewData);
                 }
             }
         }
 
-        if (viewsToDraw.empty()) return;
+        if (viewsToDraw.empty()) {
+            return;
+        }
 
         std::sort(viewsToDraw.begin(), viewsToDraw.end(),
-                  [](const std::shared_ptr<Core::PrismaView>& a, const std::shared_ptr<Core::PrismaView>& b) {
-                      return a->order < b->order;
+                  [](const std::shared_ptr<PrismaView>& left, const std::shared_ptr<PrismaView>& right) {
+                      return left->order < right->order;
                   });
 
         try {
             ID3D11BlendState* backupBlendState = nullptr;
-            FLOAT backupBlendFactor[4];
+            FLOAT backupBlendFactor[4] = {};
             UINT backupSampleMask = 0;
             ID3D11DepthStencilState* backupDepthStencilState = nullptr;
             UINT backupStencilRef = 0;
             ID3D11RasterizerState* backupRasterizerState = nullptr;
+
             d3dContext->OMGetBlendState(&backupBlendState, backupBlendFactor, &backupSampleMask);
             d3dContext->OMGetDepthStencilState(&backupDepthStencilState, &backupStencilRef);
             d3dContext->RSGetState(&backupRasterizerState);
 
             spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, commonStates->AlphaBlend());
-
             for (const auto& viewData : viewsToDraw) {
                 DrawSingleTexture(viewData);
             }
-
             spriteBatch->End();
 
             d3dContext->OMSetBlendState(backupBlendState, backupBlendFactor, backupSampleMask);
             d3dContext->OMSetDepthStencilState(backupDepthStencilState, backupStencilRef);
             d3dContext->RSSetState(backupRasterizerState);
-            if (backupBlendState) backupBlendState->Release();
-            if (backupDepthStencilState) backupDepthStencilState->Release();
-            if (backupRasterizerState) backupRasterizerState->Release();
 
+            if (backupBlendState) {
+                backupBlendState->Release();
+            }
+            if (backupDepthStencilState) {
+                backupDepthStencilState->Release();
+            }
+            if (backupRasterizerState) {
+                backupRasterizerState->Release();
+            }
         } catch (const std::exception& e) {
             logger::error("Error during SpriteBatch drawing loop: {}", e.what());
         } catch (...) {
@@ -318,27 +356,25 @@ namespace PrismaUI::ViewRenderer {
         }
     }
 
-    void DrawSingleTexture(std::shared_ptr<Core::PrismaView> viewData) {
-        if (!viewData || !viewData->textureView || viewData->textureWidth == 0 || viewData->textureHeight == 0) return;
+    void DrawSingleTexture(std::shared_ptr<PrismaView> viewData) {
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire) || !viewData->textureView ||
+            viewData->textureWidth == 0 || viewData->textureHeight == 0) {
+            return;
+        }
 
-        // Draw main view
         DirectX::SimpleMath::Vector2 position(0.0f, 0.0f);
-        RECT sourceRect = {0, 0, (long)viewData->textureWidth, (long)viewData->textureHeight};
+        RECT sourceRect = {0, 0, static_cast<long>(viewData->textureWidth), static_cast<long>(viewData->textureHeight)};
+        spriteBatch->Draw(viewData->textureView, position, &sourceRect, DirectX::Colors::White, 0.0f,
+                          DirectX::SimpleMath::Vector2::Zero, 1.0f, DirectX::SpriteEffects_None, 0.0f);
 
-        spriteBatch->Draw(viewData->textureView, position, &sourceRect, DirectX::Colors::White, 0.f,
-                          DirectX::SimpleMath::Vector2::Zero, 1.0f, DirectX::SpriteEffects_None, 0.f);
-
-        // Draw inspector overlay if visible
         if (viewData->inspectorVisible.load() && viewData->inspectorTextureView &&
             viewData->inspectorTextureWidth > 0 && viewData->inspectorTextureHeight > 0) {
-            DirectX::SimpleMath::Vector2 inspectorPos(viewData->inspectorPosX, viewData->inspectorPosY);
-            // Source rect should use actual texture dimensions
-            RECT inspectorSourceRect = {0, 0, (long)viewData->inspectorTextureWidth,
-                                        (long)viewData->inspectorTextureHeight};
-
-            spriteBatch->Draw(viewData->inspectorTextureView, inspectorPos, &inspectorSourceRect,
-                              DirectX::Colors::White, 0.f, DirectX::SimpleMath::Vector2::Zero, 1.0f,
-                              DirectX::SpriteEffects_None, 0.f);
+            DirectX::SimpleMath::Vector2 inspectorPosition(viewData->inspectorPosX, viewData->inspectorPosY);
+            RECT inspectorSourceRect = {0, 0, static_cast<long>(viewData->inspectorTextureWidth),
+                                        static_cast<long>(viewData->inspectorTextureHeight)};
+            spriteBatch->Draw(viewData->inspectorTextureView, inspectorPosition, &inspectorSourceRect,
+                              DirectX::Colors::White, 0.0f, DirectX::SimpleMath::Vector2::Zero, 1.0f,
+                              DirectX::SpriteEffects_None, 0.0f);
         }
     }
 }

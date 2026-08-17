@@ -67,6 +67,8 @@ namespace PrismaUI::Core {
         std::unordered_map<std::string, std::string> translations;
         int scrollingPixelSize = 28;
         std::atomic<bool> isPaused = false;
+        std::atomic<bool> nativePauseApplied = false;
+        std::atomic<bool> isDestroying = false;
         int order = 0;
         std::atomic<bool> inspectorVisible = false;
         std::atomic<bool> needsRecovery = false;  // Flag for recovery after exception

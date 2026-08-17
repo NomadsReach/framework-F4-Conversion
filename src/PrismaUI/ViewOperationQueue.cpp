@@ -5,56 +5,46 @@
 namespace PrismaUI::ViewOperationQueue {
     using namespace Core;
 
+    static std::shared_ptr<PrismaView> FindView(Core::PrismaViewId viewId) {
+        std::shared_lock lock(viewsMutex);
+        auto it = views.find(viewId);
+        return it != views.end() ? it->second : nullptr;
+    }
+
     bool EnqueueOperation(Core::PrismaViewId viewId, OperationFunc operation) {
         if (!operation) {
             logger::error("EnqueueOperation: Attempted to enqueue null operation for view [{}]", viewId);
             return false;
         }
 
-        std::shared_ptr<PrismaView> viewData = nullptr;
-        {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewData = it->second;
-            }
-        }
-
+        auto viewData = FindView(viewId);
         if (!viewData) {
             logger::warn("EnqueueOperation: View [{}] not found, operation discarded", viewId);
             return false;
         }
 
-        {
-            std::lock_guard lock(viewData->operationMutex);
-
-            if (viewData->pendingOperations.size() >= MAX_OPERATIONS_PER_VIEW) {
-                logger::error("EnqueueOperation: Queue overflow for view [{}]. Max size: {}. Operation discarded.",
-                              viewId, MAX_OPERATIONS_PER_VIEW);
-                return false;
-            }
-
-            viewData->pendingOperations.push(std::move(operation));
-            viewData->queuedOperationsCount.fetch_add(1, std::memory_order_relaxed);
-
-            logger::debug("EnqueueOperation: Operation enqueued for view [{}]. Queue size: {}", viewId,
-                          viewData->pendingOperations.size());
+        std::lock_guard lock(viewData->operationMutex);
+        if (viewData->isDestroying.load(std::memory_order_acquire)) {
+            logger::debug("EnqueueOperation: View [{}] is being destroyed, operation discarded", viewId);
+            return false;
         }
 
+        if (viewData->pendingOperations.size() >= MAX_OPERATIONS_PER_VIEW) {
+            logger::error("EnqueueOperation: Queue overflow for view [{}]. Max size: {}. Operation discarded.",
+                          viewId, MAX_OPERATIONS_PER_VIEW);
+            return false;
+        }
+
+        viewData->pendingOperations.push(std::move(operation));
+        viewData->queuedOperationsCount.fetch_add(1, std::memory_order_relaxed);
+        logger::debug("EnqueueOperation: Operation enqueued for view [{}]. Queue size: {}", viewId,
+                      viewData->pendingOperations.size());
         return true;
     }
 
     void ProcessNextOperation(Core::PrismaViewId viewId) {
-        std::shared_ptr<PrismaView> viewData = nullptr;
-        {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewData = it->second;
-            }
-        }
-
-        if (!viewData) {
+        auto viewData = FindView(viewId);
+        if (!viewData || viewData->isDestroying.load(std::memory_order_acquire)) {
             return;
         }
 
@@ -67,7 +57,7 @@ namespace PrismaUI::ViewOperationQueue {
         OperationFunc operation;
         {
             std::lock_guard lock(viewData->operationMutex);
-            if (viewData->pendingOperations.empty()) {
+            if (viewData->isDestroying.load(std::memory_order_acquire) || viewData->pendingOperations.empty()) {
                 viewData->isProcessingOperation.store(false, std::memory_order_release);
                 return;
             }
@@ -75,47 +65,37 @@ namespace PrismaUI::ViewOperationQueue {
             operation = std::move(viewData->pendingOperations.front());
             viewData->pendingOperations.pop();
             viewData->queuedOperationsCount.fetch_sub(1, std::memory_order_relaxed);
-
             logger::debug("ProcessNextOperation: Processing operation for view [{}]. Remaining in queue: {}", viewId,
                           viewData->pendingOperations.size());
         }
 
-        ultralightThread.submit([viewId, op = std::move(operation)]() {
-            try {
-                {
-                    std::shared_lock lock(viewsMutex);
-                    auto it = views.find(viewId);
-                    if (it == views.end()) {
-                        logger::warn("ProcessNextOperation: View [{}] was destroyed before operation execution",
-                                     viewId);
-                        return;
-                    }
+        try {
+            ultralightThread.submit([viewId, viewData, op = std::move(operation)]() mutable {
+                if (viewData->isDestroying.load(std::memory_order_acquire)) {
+                    viewData->isProcessingOperation.store(false, std::memory_order_release);
+                    return;
                 }
 
-                op();
-
-                logger::debug("ProcessNextOperation: Operation completed for view [{}]", viewId);
-            } catch (const std::exception& e) {
-                logger::error("ProcessNextOperation: Exception during operation execution for view [{}]: {}", viewId,
-                              e.what());
-            } catch (...) {
-                logger::error("ProcessNextOperation: Unknown exception during operation execution for view [{}]",
-                              viewId);
-            }
-
-            std::shared_ptr<PrismaView> vd = nullptr;
-            {
-                std::shared_lock lock(viewsMutex);
-                auto it = views.find(viewId);
-                if (it != views.end()) {
-                    vd = it->second;
+                try {
+                    op();
+                    logger::debug("ProcessNextOperation: Operation completed for view [{}]", viewId);
+                } catch (const std::exception& e) {
+                    logger::error("ProcessNextOperation: Exception during operation execution for view [{}]: {}", viewId,
+                                  e.what());
+                } catch (...) {
+                    logger::error("ProcessNextOperation: Unknown exception during operation execution for view [{}]",
+                                  viewId);
                 }
-            }
 
-            if (vd) {
-                vd->isProcessingOperation.store(false, std::memory_order_release);
-            }
-        });
+                viewData->isProcessingOperation.store(false, std::memory_order_release);
+            });
+        } catch (const std::exception& e) {
+            viewData->isProcessingOperation.store(false, std::memory_order_release);
+            logger::error("ProcessNextOperation: Failed to submit operation for view [{}]: {}", viewId, e.what());
+        } catch (...) {
+            viewData->isProcessingOperation.store(false, std::memory_order_release);
+            logger::error("ProcessNextOperation: Failed to submit operation for view [{}]", viewId);
+        }
     }
 
     void ProcessAllViewOperations() {
@@ -128,21 +108,13 @@ namespace PrismaUI::ViewOperationQueue {
             }
         }
 
-        for (const auto& viewId : viewIds) {
+        for (const auto viewId : viewIds) {
             ProcessNextOperation(viewId);
         }
     }
 
     void ClearOperations(Core::PrismaViewId viewId) {
-        std::shared_ptr<PrismaView> viewData = nullptr;
-        {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewData = it->second;
-            }
-        }
-
+        auto viewData = FindView(viewId);
         if (!viewData) {
             return;
         }
@@ -151,11 +123,9 @@ namespace PrismaUI::ViewOperationQueue {
         {
             std::lock_guard lock(viewData->operationMutex);
             clearedCount = viewData->pendingOperations.size();
-
             while (!viewData->pendingOperations.empty()) {
                 viewData->pendingOperations.pop();
             }
-
             viewData->queuedOperationsCount.store(0, std::memory_order_relaxed);
         }
 
@@ -165,15 +135,7 @@ namespace PrismaUI::ViewOperationQueue {
     }
 
     size_t GetQueueSize(Core::PrismaViewId viewId) {
-        std::shared_ptr<PrismaView> viewData = nullptr;
-        {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewData = it->second;
-            }
-        }
-
+        auto viewData = FindView(viewId);
         if (!viewData) {
             return 0;
         }
@@ -183,15 +145,7 @@ namespace PrismaUI::ViewOperationQueue {
     }
 
     bool IsProcessing(Core::PrismaViewId viewId) {
-        std::shared_ptr<PrismaView> viewData = nullptr;
-        {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewData = it->second;
-            }
-        }
-
+        auto viewData = FindView(viewId);
         if (!viewData) {
             return false;
         }

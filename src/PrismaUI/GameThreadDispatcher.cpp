@@ -12,6 +12,7 @@ namespace PrismaUI::GameThreadDispatcher {
 namespace {
 
 constexpr auto kWakeBudget = std::chrono::milliseconds(2);
+constexpr auto kDestroyWait = std::chrono::milliseconds(250);
 
 std::atomic<DWORD> g_gameThreadId{0};
 std::atomic<DWORD> g_drainThreadId{0};
@@ -132,8 +133,8 @@ void DropView(uint64_t view) noexcept
     g_tasks.dropView(view);
     const DWORD drainThread = g_drainThreadId.load(std::memory_order_acquire);
     if (drainThread != 0 && ::GetCurrentThreadId() == drainThread) return;
-    while (!g_tasks.waitUntilNotExecutingFor(view, std::chrono::seconds(5))) {
-        logger::critical("[GameThreadDispatcher] waiting for callback on destroyed view {}", view);
+    if (!g_tasks.waitUntilNotExecutingFor(view, kDestroyWait)) {
+        logger::warn("[GameThreadDispatcher] View {} destroyed while its callback was still running", view);
     }
 }
 

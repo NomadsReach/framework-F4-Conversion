@@ -48,7 +48,19 @@ FocusMenu::FocusMenu()
 // F4 signature: second param is uint64_t (not uint32_t as in Skyrim)
 void FocusMenu::AdvanceMovie([[maybe_unused]] float a_interval,
                               [[maybe_unused]] std::uint64_t a_currentTime)
-{}
+{
+    // Fallout continuously restores the vanilla CursorMenu while a cursor-using menu is active.
+    // Keep suppression on the Scaleform/UI thread instead of touching uiMovie from DXGI Present.
+    auto ui = RE::UI::GetSingleton();
+    if (!ui) {
+        return;
+    }
+
+    auto cursorMenu = ui->GetMenu("CursorMenu");
+    if (cursorMenu && cursorMenu->uiMovie) {
+        cursorMenu->uiMovie->SetVisible(false);
+    }
+}
 
 RE::UI_MESSAGE_RESULTS FocusMenu::ProcessMessage(RE::UIMessage& a_message)
 {

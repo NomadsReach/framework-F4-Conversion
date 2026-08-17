@@ -8,100 +8,108 @@ namespace PrismaUI::Communication {
     using namespace Core;
     using namespace ViewManager;
 
-    void Invoke(const Core::PrismaViewId& viewId, const String& script, std::function<void(std::string)> callback) {
-        std::shared_ptr<PrismaView> viewData = nullptr;
-        {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewData = it->second;
-            }
+    static std::shared_ptr<PrismaView> FindLiveView(const Core::PrismaViewId& viewId) {
+        std::shared_lock lock(viewsMutex);
+        auto it = views.find(viewId);
+        if (it == views.end() || !it->second || it->second->isDestroying.load(std::memory_order_acquire)) {
+            return nullptr;
         }
+        return it->second;
+    }
 
+    void Invoke(const Core::PrismaViewId& viewId, const String& script, std::function<void(std::string)> callback) {
+        auto viewData = FindLiveView(viewId);
         if (!viewData) {
-            logger::warn("Invoke: View ID [{}] not found.", viewId);
+            logger::warn("Invoke: View ID [{}] not found or is being destroyed.", viewId);
             if (callback) {
                 callback("");
             }
             return;
         }
 
-        ultralightThread.submit([view_ptr = viewData->ultralightView, script_copy = script, callback]() {
-            String result = "";
-            if (view_ptr) {
-                try {
-                    result = view_ptr->EvaluateScript(script_copy, nullptr);
-                } catch (const std::exception& e) {
-                    logger::error("Exception during EvaluateScript: {}", e.what());
-                } catch (...) {
-                    logger::error("Unknown exception during EvaluateScript");
+        try {
+            ultralightThread.submit([viewId, viewData, scriptCopy = script, callback = std::move(callback)]() mutable {
+                String result = "";
+                if (!viewData->isDestroying.load(std::memory_order_acquire) && viewData->ultralightView) {
+                    try {
+                        result = viewData->ultralightView->EvaluateScript(scriptCopy, nullptr);
+                    } catch (const std::exception& e) {
+                        logger::error("Invoke [{}]: Exception during EvaluateScript: {}", viewId, e.what());
+                    } catch (...) {
+                        logger::error("Invoke [{}]: Unknown exception during EvaluateScript", viewId);
+                    }
                 }
-            }
 
+                if (callback) {
+                    callback(result.utf8().data());
+                }
+            });
+        } catch (const std::exception& e) {
+            logger::error("Invoke [{}]: Failed to submit Ultralight work: {}", viewId, e.what());
             if (callback) {
-                callback(result.utf8().data());
+                callback("");
             }
-        });
+        }
     }
 
     void RegisterJSListener(const Core::PrismaViewId& viewId, const std::string& name,
                             Core::SimpleJSCallback callback) {
-        if (!ViewManager::IsValid(viewId)) {
-            logger::error("RegisterJSListener: View ID [{}] not found.", viewId);
+        auto viewData = FindLiveView(viewId);
+        if (!viewData) {
+            logger::error("RegisterJSListener: View ID [{}] not found or is being destroyed.", viewId);
             return;
         }
 
         {
             std::lock_guard<std::mutex> lock(jsCallbacksMutex);
+            if (viewData->isDestroying.load(std::memory_order_acquire)) {
+                return;
+            }
+
             JSCallbackData data;
             data.viewId = viewId;
             data.name = name;
-            data.callback = callback;
+            data.callback = std::move(callback);
             jsCallbacks[std::make_pair(viewId, name)] = std::move(data);
             logger::debug("RegisterJSListener: Registered callback '{}' for view [{}]", name, viewId);
         }
 
-        std::shared_ptr<PrismaView> viewData = nullptr;
-        {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewData = it->second;
+        if (viewData->ultralightView && viewData->isLoadingFinished.load() &&
+            !viewData->isDestroying.load(std::memory_order_acquire)) {
+            try {
+                ultralightThread.submit([viewId]() { BindJSCallbacks(viewId); });
+            } catch (const std::exception& e) {
+                logger::error("RegisterJSListener [{}]: Failed to submit callback binding: {}", viewId, e.what());
             }
-        }
-
-        if (viewData && viewData->ultralightView && viewData->isLoadingFinished) {
-            ultralightThread.submit([viewId, name]() { BindJSCallbacks(viewId); });
         }
     }
 
     void BindJSCallbacks(const Core::PrismaViewId& viewId) {
-        std::shared_ptr<PrismaView> viewData = nullptr;
-        std::unordered_map<std::string, std::string> translationsCopy;
-        bool hasTranslations = false;
-        {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewData = it->second;
-                if (viewData && !viewData->translationPluginName.empty() && !viewData->translations.empty()) {
-                    translationsCopy = viewData->translations;
-                    hasTranslations = true;
-                }
-            }
-        }
-
-        if (!viewData || !viewData->ultralightView || !viewData->isLoadingFinished) {
-            logger::warn("BindJSCallbacks: View [{}] not ready or not loaded.", viewId);
+        auto viewData = FindLiveView(viewId);
+        if (!viewData || !viewData->ultralightView || !viewData->isLoadingFinished.load()) {
+            logger::warn("BindJSCallbacks: View [{}] not ready, not loaded, or being destroyed.", viewId);
             return;
         }
 
-        if (hasTranslations) {
+        std::unordered_map<std::string, std::string> translationsCopy;
+        {
+            std::shared_lock lock(viewsMutex);
+            auto it = views.find(viewId);
+            if (it == views.end() || it->second != viewData ||
+                viewData->isDestroying.load(std::memory_order_acquire)) {
+                return;
+            }
+            if (!viewData->translationPluginName.empty() && !viewData->translations.empty()) {
+                translationsCopy = viewData->translations;
+            }
+        }
+
+        if (!translationsCopy.empty()) {
             std::string l10nScript = Translations::BuildL10NScript(translationsCopy);
-            if (!l10nScript.empty()) {
-                ultralight::String ul_script(l10nScript.c_str());
+            if (!l10nScript.empty() && !viewData->isDestroying.load(std::memory_order_acquire)) {
+                ultralight::String ulScript(l10nScript.c_str());
                 try {
-                    viewData->ultralightView->EvaluateScript(ul_script, nullptr);
+                    viewData->ultralightView->EvaluateScript(ulScript, nullptr);
                     logger::debug("BindJSCallbacks: Injected L10N translations for view [{}].", viewId);
                 } catch (...) {
                     logger::error("BindJSCallbacks: Failed to inject L10N translations for view [{}].", viewId);
@@ -112,6 +120,9 @@ namespace PrismaUI::Communication {
         std::vector<JSCallbackData> viewCallbacks;
         {
             std::lock_guard<std::mutex> lock(jsCallbacksMutex);
+            if (viewData->isDestroying.load(std::memory_order_acquire)) {
+                return;
+            }
             for (const auto& pair : jsCallbacks) {
                 if (pair.first.first == viewId) {
                     viewCallbacks.push_back(pair.second);
@@ -119,23 +130,25 @@ namespace PrismaUI::Communication {
             }
         }
 
-        if (viewCallbacks.empty()) {
+        if (viewCallbacks.empty() || viewData->isDestroying.load(std::memory_order_acquire)) {
             return;
         }
 
-        auto scoped_context = viewData->ultralightView->LockJSContext();
-        JSContextRef ctx = scoped_context->ctx();
+        auto scopedContext = viewData->ultralightView->LockJSContext();
+        JSContextRef ctx = scopedContext->ctx();
         JSObjectRef globalObj = JSContextGetGlobalObject(ctx);
 
         for (const auto& callbackData : viewCallbacks) {
+            if (viewData->isDestroying.load(std::memory_order_acquire)) {
+                return;
+            }
+
             logger::debug("BindJSCallbacks: Binding callback '{}' for view [{}]", callbackData.name,
                           callbackData.viewId);
 
             JSObjectRef dataObj = JSObjectMake(ctx, nullptr, nullptr);
-
             JSStringRef viewIdKey = JSStringCreateWithUTF8CString("viewId");
             JSStringRef nameKey = JSStringCreateWithUTF8CString("name");
-
             JSStringRef viewIdValue = JSStringCreateWithUTF8CString(std::to_string(callbackData.viewId).c_str());
             JSStringRef nameValue = JSStringCreateWithUTF8CString(callbackData.name.c_str());
 
@@ -149,17 +162,13 @@ namespace PrismaUI::Communication {
             JSStringRelease(viewIdValue);
             JSStringRelease(nameValue);
 
-            JSStringRef funcJS = JSStringCreateWithUTF8CString(callbackData.name.c_str());
-
-            JSObjectRef funcObj = JSObjectMakeFunctionWithCallback(ctx, funcJS, InvokeCppCallback);
-
+            JSStringRef functionName = JSStringCreateWithUTF8CString(callbackData.name.c_str());
+            JSObjectRef functionObject = JSObjectMakeFunctionWithCallback(ctx, functionName, InvokeCppCallback);
             JSStringRef dataKey = JSStringCreateWithUTF8CString("data");
-            JSObjectSetProperty(ctx, funcObj, dataKey, dataObj, kJSPropertyAttributeReadOnly, nullptr);
+            JSObjectSetProperty(ctx, functionObject, dataKey, dataObj, kJSPropertyAttributeReadOnly, nullptr);
             JSStringRelease(dataKey);
-
-            JSObjectSetProperty(ctx, globalObj, funcJS, funcObj, kJSPropertyAttributeNone, nullptr);
-
-            JSStringRelease(funcJS);
+            JSObjectSetProperty(ctx, globalObj, functionName, functionObject, kJSPropertyAttributeNone, nullptr);
+            JSStringRelease(functionName);
 
             logger::debug("BindJSCallbacks: Successfully bound callback '{}' for view [{}]", callbackData.name,
                           callbackData.viewId);
@@ -169,7 +178,6 @@ namespace PrismaUI::Communication {
     JSValueRef JSCallbackDispatcher(JSContextRef ctx, JSObjectRef function, [[maybe_unused]] JSObjectRef thisObject,
                                     size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception) {
         Core::JSCallbackData* callbackDataPtr = static_cast<Core::JSCallbackData*>(JSObjectGetPrivate(function));
-
         if (!callbackDataPtr) {
             logger::error("JSCallbackDispatcher: Missing private callback data");
             if (exception) {
@@ -184,6 +192,10 @@ namespace PrismaUI::Communication {
         Core::PrismaViewId retrievedViewId = callbackDataPtr->viewId;
         std::string retrievedName = callbackDataPtr->name;
         Core::SimpleJSCallback targetCallback = callbackDataPtr->callback;
+
+        if (!FindLiveView(retrievedViewId)) {
+            return JSValueMakeNull(ctx);
+        }
 
         std::string paramStrData;
         if (argumentCount > 0) {
@@ -223,7 +235,6 @@ namespace PrismaUI::Communication {
             logger::debug("JSCallbackDispatcher: Target callback found. Invoking with data: '{}'", paramStrData);
             try {
                 targetCallback(paramStrData);
-
                 logger::debug("JSCallbackDispatcher: Target callback invoked successfully.");
             } catch (const std::exception& e) {
                 logger::error("JSCallbackDispatcher: C++ exception in registered callback for '{}'/'{}': {}",
@@ -243,86 +254,79 @@ namespace PrismaUI::Communication {
                 JSStringRelease(errorStr);
             }
         }
-        logger::debug("JSCallbackDispatcher: Exiting.");
+
         return JSValueMakeNull(ctx);
     }
 
     void InteropCall(const Core::PrismaViewId& viewId, const std::string& functionName, const std::string& argument) {
-        std::shared_ptr<PrismaView> viewData = nullptr;
-        {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(viewId);
-            if (it != views.end()) {
-                viewData = it->second;
-            }
-        }
-
+        auto viewData = FindLiveView(viewId);
         if (!viewData) {
-            logger::warn("InteropCall: View ID [{}] not found.", viewId);
+            logger::warn("InteropCall: View ID [{}] not found or is being destroyed.", viewId);
             return;
         }
-
         if (!viewData->ultralightView) {
             logger::warn("InteropCall: View ID [{}] has no Ultralight view object.", viewId);
             return;
         }
 
-        ultralightThread.submit([view_ptr = viewData->ultralightView, funcName = functionName, arg = argument,
-                                 viewId]() {
-            if (!view_ptr) {
-                return;
-            }
-
-            auto scoped_context = view_ptr->LockJSContext();
-            JSContextRef ctx = scoped_context->ctx();
-            JSValueRef exception = nullptr;
-
-            JSObjectRef globalObj = JSContextGetGlobalObject(ctx);
-
-            JSRetainPtr<JSStringRef> funcNameStr = adopt(JSStringCreateWithUTF8CString(funcName.c_str()));
-            JSValueRef funcValue = JSObjectGetProperty(ctx, globalObj, funcNameStr.get(), &exception);
-
-            if (exception) {
-                JSStringRef exceptionStr = JSValueToStringCopy(ctx, exception, nullptr);
-                size_t bufferSize = JSStringGetMaximumUTF8CStringSize(exceptionStr);
-                std::vector<char> buffer(bufferSize);
-                JSStringGetUTF8CString(exceptionStr, buffer.data(), bufferSize);
-                logger::error("InteropCall [{}]: Exception getting function '{}': {}", viewId, funcName, buffer.data());
-                JSStringRelease(exceptionStr);
-                return;
-            }
-
-            if (JSValueIsObject(ctx, funcValue)) {
-                JSObjectRef funcObj = JSValueToObject(ctx, funcValue, nullptr);
-
-                if (funcObj && JSObjectIsFunction(ctx, funcObj)) {
-                    JSRetainPtr<JSStringRef> argStr = adopt(JSStringCreateWithUTF8CString(arg.c_str()));
-                    const JSValueRef args[] = {JSValueMakeString(ctx, argStr.get())};
-
-                    JSObjectCallAsFunction(ctx, funcObj, globalObj, 1, args, &exception);
-
-                    if (exception) {
-                        JSStringRef exceptionStr = JSValueToStringCopy(ctx, exception, nullptr);
-                        size_t bufferSize = JSStringGetMaximumUTF8CStringSize(exceptionStr);
-                        std::vector<char> buffer(bufferSize);
-                        JSStringGetUTF8CString(exceptionStr, buffer.data(), bufferSize);
-                        logger::error("InteropCall [{}]: Exception calling function '{}': {}", viewId, funcName,
-                                      buffer.data());
-                        JSStringRelease(exceptionStr);
-                    }
-                } else {
-                    logger::warn("InteropCall [{}]: Global property '{}' is not a function.", viewId, funcName);
+        try {
+            ultralightThread.submit([viewData, funcName = functionName, arg = argument, viewId]() {
+                if (viewData->isDestroying.load(std::memory_order_acquire) || !viewData->ultralightView) {
+                    return;
                 }
-            } else {
-                logger::warn("InteropCall [{}]: Global property '{}' not found or not an object.", viewId, funcName);
-            }
-        });
+
+                auto scopedContext = viewData->ultralightView->LockJSContext();
+                JSContextRef ctx = scopedContext->ctx();
+                JSValueRef exception = nullptr;
+                JSObjectRef globalObj = JSContextGetGlobalObject(ctx);
+
+                JSRetainPtr<JSStringRef> funcNameStr = adopt(JSStringCreateWithUTF8CString(funcName.c_str()));
+                JSValueRef funcValue = JSObjectGetProperty(ctx, globalObj, funcNameStr.get(), &exception);
+
+                if (exception) {
+                    JSStringRef exceptionStr = JSValueToStringCopy(ctx, exception, nullptr);
+                    size_t bufferSize = JSStringGetMaximumUTF8CStringSize(exceptionStr);
+                    std::vector<char> buffer(bufferSize);
+                    JSStringGetUTF8CString(exceptionStr, buffer.data(), bufferSize);
+                    logger::error("InteropCall [{}]: Exception getting function '{}': {}", viewId, funcName,
+                                  buffer.data());
+                    JSStringRelease(exceptionStr);
+                    return;
+                }
+
+                if (!JSValueIsObject(ctx, funcValue)) {
+                    logger::warn("InteropCall [{}]: Global property '{}' not found or not an object.", viewId,
+                                 funcName);
+                    return;
+                }
+
+                JSObjectRef funcObj = JSValueToObject(ctx, funcValue, nullptr);
+                if (!funcObj || !JSObjectIsFunction(ctx, funcObj)) {
+                    logger::warn("InteropCall [{}]: Global property '{}' is not a function.", viewId, funcName);
+                    return;
+                }
+
+                JSRetainPtr<JSStringRef> argStr = adopt(JSStringCreateWithUTF8CString(arg.c_str()));
+                const JSValueRef args[] = {JSValueMakeString(ctx, argStr.get())};
+                JSObjectCallAsFunction(ctx, funcObj, globalObj, 1, args, &exception);
+
+                if (exception) {
+                    JSStringRef exceptionStr = JSValueToStringCopy(ctx, exception, nullptr);
+                    size_t bufferSize = JSStringGetMaximumUTF8CStringSize(exceptionStr);
+                    std::vector<char> buffer(bufferSize);
+                    JSStringGetUTF8CString(exceptionStr, buffer.data(), bufferSize);
+                    logger::error("InteropCall [{}]: Exception calling function '{}': {}", viewId, funcName,
+                                  buffer.data());
+                    JSStringRelease(exceptionStr);
+                }
+            });
+        } catch (const std::exception& e) {
+            logger::error("InteropCall [{}]: Failed to submit Ultralight work: {}", viewId, e.what());
+        }
     }
 
     JSValueRef InvokeCppCallback(JSContextRef ctx, JSObjectRef function, [[maybe_unused]] JSObjectRef thisObject,
                                  size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception) {
-        logger::debug("InvokeCppCallback: Called from JavaScript");
-
         JSStringRef dataKeyStr = JSStringCreateWithUTF8CString("data");
         JSValueRef dataValue = JSObjectGetProperty(ctx, function, dataKeyStr, exception);
         JSStringRelease(dataKeyStr);
@@ -334,7 +338,6 @@ namespace PrismaUI::Communication {
 
         JSStringRef viewIdKey = JSStringCreateWithUTF8CString("viewId");
         JSStringRef nameKey = JSStringCreateWithUTF8CString("name");
-
         JSObjectRef dataObj = JSValueToObject(ctx, dataValue, exception);
         if (!dataObj) {
             logger::error("InvokeCppCallback: Failed to convert data to object");
@@ -345,7 +348,6 @@ namespace PrismaUI::Communication {
 
         JSValueRef viewIdValue = JSObjectGetProperty(ctx, dataObj, viewIdKey, exception);
         JSValueRef nameValue = JSObjectGetProperty(ctx, dataObj, nameKey, exception);
-
         JSStringRelease(viewIdKey);
         JSStringRelease(nameKey);
 
@@ -356,31 +358,39 @@ namespace PrismaUI::Communication {
 
         JSStringRef viewIdStr = JSValueToStringCopy(ctx, viewIdValue, exception);
         JSStringRef nameStr = JSValueToStringCopy(ctx, nameValue, exception);
-
         if (!viewIdStr || !nameStr) {
             logger::error("InvokeCppCallback: Failed to convert viewId or name to string");
-            if (viewIdStr) JSStringRelease(viewIdStr);
-            if (nameStr) JSStringRelease(nameStr);
+            if (viewIdStr) {
+                JSStringRelease(viewIdStr);
+            }
+            if (nameStr) {
+                JSStringRelease(nameStr);
+            }
             return JSValueMakeUndefined(ctx);
         }
 
         size_t viewIdLen = JSStringGetMaximumUTF8CStringSize(viewIdStr);
         size_t nameLen = JSStringGetMaximumUTF8CStringSize(nameStr);
-
         std::vector<char> viewIdBuffer(viewIdLen);
         std::vector<char> nameBuffer(nameLen);
-
         JSStringGetUTF8CString(viewIdStr, viewIdBuffer.data(), viewIdLen);
         JSStringGetUTF8CString(nameStr, nameBuffer.data(), nameLen);
-
         JSStringRelease(viewIdStr);
         JSStringRelease(nameStr);
 
-        Core::PrismaViewId viewId = std::stoull(std::string(viewIdBuffer.data()));
+        Core::PrismaViewId viewId = 0;
+        try {
+            viewId = std::stoull(std::string(viewIdBuffer.data()));
+        } catch (...) {
+            logger::error("InvokeCppCallback: Invalid view ID");
+            return JSValueMakeUndefined(ctx);
+        }
+
+        if (!FindLiveView(viewId)) {
+            return JSValueMakeUndefined(ctx);
+        }
+
         std::string name(nameBuffer.data());
-
-        logger::debug("InvokeCppCallback: Looking for callback viewId={}, name={}", viewId, name);
-
         std::string paramStr;
         if (argumentCount > 0) {
             JSStringRef jsStrParam = JSValueToStringCopy(ctx, arguments[0], exception);
@@ -395,32 +405,26 @@ namespace PrismaUI::Communication {
 
         Core::SimpleJSCallback targetCallback = nullptr;
         {
-            std::lock_guard<std::mutex> lock(PrismaUI::Core::jsCallbacksMutex);
-            auto it = PrismaUI::Core::jsCallbacks.find(std::make_pair(viewId, name));
-            if (it != PrismaUI::Core::jsCallbacks.end()) {
+            std::lock_guard<std::mutex> lock(jsCallbacksMutex);
+            auto it = jsCallbacks.find(std::make_pair(viewId, name));
+            if (it != jsCallbacks.end()) {
                 targetCallback = it->second.callback;
             }
         }
 
-        if (targetCallback) {
-            logger::debug("InvokeCppCallback: Found callback. Invoking with data: '{}'", paramStr);
+        if (targetCallback && FindLiveView(viewId)) {
             try {
                 targetCallback(paramStr);
-
-                logger::debug("InvokeCppCallback: Callback invoked successfully");
             } catch (const std::exception& e) {
                 logger::error("InvokeCppCallback: Exception in callback: {}", e.what());
             } catch (...) {
                 logger::error("InvokeCppCallback: Unknown exception in callback");
             }
-        } else {
-            logger::error("InvokeCppCallback: Callback not found for viewId={}, name={}", viewId, name);
-            if (exception) {
-                std::string errMsg = "C++ callback not found: " + name + " for view " + std::to_string(viewId);
-                JSStringRef errorStr = JSStringCreateWithUTF8CString(errMsg.c_str());
-                *exception = JSValueMakeString(ctx, errorStr);
-                JSStringRelease(errorStr);
-            }
+        } else if (exception) {
+            std::string errMsg = "C++ callback not found: " + name + " for view " + std::to_string(viewId);
+            JSStringRef errorStr = JSStringCreateWithUTF8CString(errMsg.c_str());
+            *exception = JSValueMakeString(ctx, errorStr);
+            JSStringRelease(errorStr);
         }
 
         return JSValueMakeUndefined(ctx);

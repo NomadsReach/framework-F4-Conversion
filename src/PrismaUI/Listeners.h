@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #pragma warning(push)
 #pragma warning(disable : 4100)
@@ -10,47 +10,46 @@
 #pragma warning(pop)
 
 namespace PrismaUI::Core {
-    typedef uint64_t PrismaViewId;
+typedef uint64_t PrismaViewId;
 }
 
 namespace PrismaUI::Listeners {
-    using namespace ultralight;
+using namespace ultralight;
 
-    class MyLoadListener : public LoadListener {
-        Core::PrismaViewId viewId_;
+class MyLoadListener : public LoadListener {
+public:
+    explicit MyLoadListener(Core::PrismaViewId id);
+    ~MyLoadListener() override;
 
-    public:
-        explicit MyLoadListener(Core::PrismaViewId id);
-        virtual ~MyLoadListener();
+    void OnBeginLoading(View* caller, uint64_t frameId, bool isMainFrame, const String& url) override;
+    void OnFinishLoading(View* caller, uint64_t frameId, bool isMainFrame, const String& url) override;
+    void OnFailLoading(View* caller, uint64_t frameId, bool isMainFrame, const String& url,
+                       const String& description, const String& errorDomain, int errorCode) override;
+    void OnWindowObjectReady(View* caller, uint64_t frameId, bool isMainFrame, const String& url) override;
+    void OnDOMReady(View* caller, uint64_t frameId, bool isMainFrame, const String& url) override;
 
-        virtual void OnBeginLoading(View* caller, uint64_t frame_id, bool is_main_frame, const String& url) override;
-        virtual void OnFinishLoading(View* caller, uint64_t frame_id, bool is_main_frame, const String& url) override;
-        virtual void OnFailLoading(View* caller, uint64_t frame_id, bool is_main_frame, const String& url,
-                                   const String& description, const String& error_domain, int error_code) override;
-        virtual void OnWindowObjectReady(View* caller, uint64_t frame_id, bool is_main_frame,
-                                         const String& url) override;
-        virtual void OnDOMReady(View* caller, uint64_t frame_id, bool is_main_frame, const String& url) override;
-    };
+private:
+    Core::PrismaViewId viewId_;
+};
 
-    class MyViewListener : public ViewListener {
-        Core::PrismaViewId viewId_;
+class MyViewListener : public ViewListener {
+public:
+    explicit MyViewListener(Core::PrismaViewId id);
+    ~MyViewListener() override;
 
-    public:
-        explicit MyViewListener(Core::PrismaViewId id);
-        virtual ~MyViewListener();
+    void OnAddConsoleMessage(View* caller, const ConsoleMessage& message) override;
+    RefPtr<View> OnCreateChildView(View* caller, const String& openerUrl, const String& targetUrl,
+                                   bool isPopup, const IntRect& popupRect) override;
+    RefPtr<View> OnCreateInspectorView(View* caller, bool isLocal, const String& inspectedUrl) override;
 
-        virtual void OnAddConsoleMessage(ultralight::View* caller,
-                                         const ultralight::ConsoleMessage& message) override;
-        // Explicitly block all child-view creation (window.open, target=_blank).
-        virtual RefPtr<View> OnCreateChildView(View* caller, const String& opener_url,
-                                               const String& target_url, bool is_popup,
-                                               const IntRect& popup_rect) override;
-        virtual RefPtr<View> OnCreateInspectorView(View* caller, bool is_local, const String& inspectedURL) override;
-    };
+private:
+    Core::PrismaViewId viewId_;
+};
 
-    class MyUltralightLogger : public Logger {
-    public:
-        virtual ~MyUltralightLogger();
-        virtual void LogMessage(LogLevel log_level, const String& message) override;
-    };
+class MyUltralightLogger : public Logger {
+public:
+    ~MyUltralightLogger() override;
+    void LogMessage(LogLevel logLevel, const String& message) override;
+};
+
 }

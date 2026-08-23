@@ -1,237 +1,190 @@
 #include "PCH.h"
+
+#include <commctrl.h>
+#include <filesystem>
+#include <shellapi.h>
+#include <tlhelp32.h>
+
 #include "API/API.h"
 #include "Hooks/Hooks.h"
-#include "Utils/DllLoader.h"
+#include "PrismaUI/GameThreadDispatcher.h"
 #include "PrismaUI/NotificationSystem.h"
-#include <tlhelp32.h>
-#include <filesystem>
-#include <commctrl.h>
-#include <shellapi.h>
+#include "Utils/DllLoader.h"
 
 static bool g_overlayDetected = false;
-static bool g_pluginDisabled = false;
 static std::string g_detectedOverlayName;
 
 namespace {
-    // Returns the path to Data\F4SE\Plugins\PrismaUI_F4.ini by deriving it
-    // from the DLL's own location (the DLL lives in that same folder).
-    static std::string GetIniPath() {
-        wchar_t modPath[MAX_PATH] = {};
-        GetModuleFileNameW(GetModuleHandleW(L"PrismaUI_F4.dll"), modPath, MAX_PATH);
-        auto ini = std::filesystem::path(modPath).replace_extension(L".ini");
-        return ini.string();
-    }
 
-    // Read a bool (0/1) from [section] key in PrismaUI_F4.ini.
-    // Returns defaultValue when the file or key is absent.
-    static bool ReadIniBool(const char* section, const char* key, bool defaultValue) {
-        const std::string path = GetIniPath();
-        const int def = defaultValue ? 1 : 0;
-        const int val = GetPrivateProfileIntA(section, key, def, path.c_str());
-        return val != 0;
-    }
-}
-
-namespace {
-    bool IsConflictingOverlayRunning() {
-        const char* conflicting_procs[] = {
-            "RTSS.exe",              // RivaTuner Statistics Server
-            "RTSSHooked.exe",        // RivaTuner hooked version
-            "RTSSHooksLoader64.exe", // RivaTuner background loader (even when window closed)
-            "MSIAfterburner.exe",    // MSI Afterburner
-            "OverdriveNTool.exe",    // AMD Overdrive
-        };
-
-        const char* friendly_names[] = {
-            "RivaTuner Statistics Server (RTSS.exe)",
-            "RivaTuner (RTSSHooked.exe)",
-            "RivaTuner Loader (RTSSHooksLoader64.exe) - close from system tray",
-            "MSI Afterburner (MSIAfterburner.exe)",
-            "AMD Overdrive (OverdriveNTool.exe)",
-        };
-
-        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (snapshot == INVALID_HANDLE_VALUE) return false;
-
-        PROCESSENTRY32 entry{};
-        entry.dwSize = sizeof(PROCESSENTRY32);
-
-        if (Process32First(snapshot, &entry)) {
-            do {
-                for (size_t i = 0; i < 5; ++i) {
-                    if (_stricmp(entry.szExeFile, conflicting_procs[i]) == 0) {
-                        logger::warn("[PrismaUI Overlay Detection] Found: {}", entry.szExeFile);
-                        g_detectedOverlayName = friendly_names[i];
-                        CloseHandle(snapshot);
-                        return true;
-                    }
-                }
-            } while (Process32Next(snapshot, &entry));
-        }
-
-        CloseHandle(snapshot);
-        return false;
-    }
-
-    void NotifyUserOverlayDetected() {
-        // Convert ASCII overlay name to wide for TaskDialog
-        std::wstring overlayW(g_detectedOverlayName.begin(), g_detectedOverlayName.end());
-
-        std::wstring content =
-            L"Detected: " + overlayW + L"\n\n"
-            L"This software hooks DirectX and can conflict with Ultralight rendering.\n"
-            L"Click Continue to load anyway - PrismaUI will remember this choice.";
-
-        TASKDIALOGCONFIG tdc      = {};
-        tdc.cbSize                = sizeof(tdc);
-        tdc.dwFlags               = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
-        tdc.pszWindowTitle        = L"PrismaUI Framework";
-        tdc.pszMainIcon           = TD_WARNING_ICON;
-        tdc.pszMainInstruction    = L"GPU Overlay Software Detected";
-        tdc.pszContent            = content.c_str();
-        tdc.dwCommonButtons       = TDCBF_OK_BUTTON;
-        tdc.nDefaultButton        = IDOK;
-        tdc.pszFooter             = L"How to disable the overlay: youtube.com/watch?v=1NPqDMlYGz0";
-        tdc.pszFooterIcon         = TD_INFORMATION_ICON;
-
-        // Activate the comctl32 v6 manifest embedded in this DLL so TaskDialogIndirect
-        // works even when the host EXE (OG Fallout4.exe) has no v6 activation context.
-        ACTCTXW actCtx        = {};
-        actCtx.cbSize         = sizeof(actCtx);
-        actCtx.dwFlags        = ACTCTX_FLAG_RESOURCE_NAME_VALID | ACTCTX_FLAG_HMODULE_VALID;
-        actCtx.lpResourceName = MAKEINTRESOURCEW(2);
-        actCtx.hModule        = GetModuleHandleW(L"PrismaUI_F4.dll");
-
-        HANDLE    hCtx   = CreateActCtxW(&actCtx);
-        ULONG_PTR cookie = 0;
-        const bool activated = (hCtx != INVALID_HANDLE_VALUE) && ActivateActCtx(hCtx, &cookie);
-
-        if (!activated)
-            logger::warn("[PrismaUI] Could not activate comctl32 v6 context (hCtx={}, GLE={})",
-                (void*)hCtx, GetLastError());
-
-        // Load comctl32 within the activation context so we get the v6 entry point.
-        using FnTaskDialogIndirect = HRESULT(WINAPI*)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
-        FnTaskDialogIndirect pfnTaskDialog = nullptr;
-        HMODULE hComCtl = LoadLibraryW(L"comctl32.dll");
-        if (hComCtl)
-            pfnTaskDialog = reinterpret_cast<FnTaskDialogIndirect>(
-                GetProcAddress(hComCtl, "TaskDialogIndirect"));
-
-        logger::info("[PrismaUI] overlay dialog: activated={} pfn={}", activated, (void*)pfnTaskDialog);
-
-        // nButton==0 means the dialog returned without being shown (silent failure on OG).
-        int     nButton = 0;
-        HRESULT hr      = E_NOTIMPL;
-        if (pfnTaskDialog)
-            hr = pfnTaskDialog(&tdc, &nButton, nullptr, nullptr);
-
-        logger::info("[PrismaUI] TaskDialogIndirect hr=0x{:08x} nButton={}", (uint32_t)hr, nButton);
-
-        if (hComCtl) FreeLibrary(hComCtl);
-        if (activated)                    DeactivateActCtx(0, cookie);
-        if (hCtx != INVALID_HANDLE_VALUE) ReleaseActCtx(hCtx);
-
-        // Fall back to MessageBoxW when TaskDialog failed OR returned without any
-        // button press (nButton==0 means the window was never shown — silent on OG).
-        if (FAILED(hr) || nButton == 0) {
-            logger::warn("[PrismaUI] TaskDialogIndirect unavailable (hr=0x{:08x} nButton={}), using MessageBoxW", (uint32_t)hr, nButton);
-            std::wstring fallback =
-                L"GPU overlay software detected: " + overlayW + L"\n\n"
-                L"This software hooks DirectX and can conflict with Ultralight rendering.\n\n"
-                L"Click OK to continue loading with overlay support enabled.\n"
-                L"You may see visual artifacts - close the overlay if issues occur.\n\n"
-                L"How to disable the RTSS overlay:\n"
-                L"https://www.youtube.com/watch?v=1NPqDMlYGz0";
-            MessageBoxW(nullptr, fallback.c_str(), L"PrismaUI - Overlay Detected", MB_OK | MB_ICONWARNING);
-        }
-
-        // Persist the opt-in so this dialog never appears again
-        const std::string iniPath = GetIniPath();
-        WritePrivateProfileStringA("Compatibility", "bAllowOverlays", "1", iniPath.c_str());
-        logger::warn("[PrismaUI] bAllowOverlays=1 written to {} - overlay check suppressed on next launch", iniPath);
-    }
-}
-
-static void F4SEMessageHandler(F4SE::MessagingInterface::Message* message)
+std::string GetIniPath()
 {
-    if (message->type == F4SE::MessagingInterface::kGameDataReady) {
+    wchar_t modulePath[MAX_PATH] = {};
+    if (!GetModuleFileNameW(GetModuleHandleW(L"PrismaUI_F4.dll"), modulePath, MAX_PATH)) return {};
+    return std::filesystem::path(modulePath).replace_extension(L".ini").string();
+}
+
+bool ReadIniBool(const char* section, const char* key, bool defaultValue)
+{
+    const std::string path = GetIniPath();
+    if (path.empty()) return defaultValue;
+    return GetPrivateProfileIntA(section, key, defaultValue ? 1 : 0, path.c_str()) != 0;
+}
+
+bool IsConflictingOverlayRunning()
+{
+    constexpr const char* processes[] = {
+        "RTSS.exe",
+        "RTSSHooked.exe",
+        "RTSSHooksLoader64.exe",
+        "MSIAfterburner.exe",
+        "OverdriveNTool.exe",
+    };
+    constexpr const char* names[] = {
+        "RivaTuner Statistics Server (RTSS.exe)",
+        "RivaTuner (RTSSHooked.exe)",
+        "RivaTuner Loader (RTSSHooksLoader64.exe) - close from system tray",
+        "MSI Afterburner (MSIAfterburner.exe)",
+        "AMD Overdrive (OverdriveNTool.exe)",
+    };
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return false;
+
+    PROCESSENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    if (Process32First(snapshot, &entry)) {
+        do {
+            for (size_t i = 0; i < std::size(processes); ++i) {
+                if (_stricmp(entry.szExeFile, processes[i]) == 0) {
+                    g_detectedOverlayName = names[i];
+                    CloseHandle(snapshot);
+                    return true;
+                }
+            }
+        } while (Process32Next(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return false;
+}
+
+void NotifyUserOverlayDetected()
+{
+    const std::wstring overlayName(g_detectedOverlayName.begin(), g_detectedOverlayName.end());
+    const std::wstring content =
+        L"Detected: " + overlayName + L"\n\n"
+        L"This software hooks DirectX and can conflict with Ultralight rendering.\n"
+        L"Click OK to continue. PrismaUI will remember this choice.";
+
+    TASKDIALOGCONFIG dialog{};
+    dialog.cbSize = sizeof(dialog);
+    dialog.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+    dialog.pszWindowTitle = L"PrismaUI Framework";
+    dialog.pszMainIcon = TD_WARNING_ICON;
+    dialog.pszMainInstruction = L"GPU Overlay Software Detected";
+    dialog.pszContent = content.c_str();
+    dialog.dwCommonButtons = TDCBF_OK_BUTTON;
+    dialog.nDefaultButton = IDOK;
+    dialog.pszFooter = L"How to disable the overlay: youtube.com/watch?v=1NPqDMlYGz0";
+    dialog.pszFooterIcon = TD_INFORMATION_ICON;
+
+    ACTCTXW activation{};
+    activation.cbSize = sizeof(activation);
+    activation.dwFlags = ACTCTX_FLAG_RESOURCE_NAME_VALID | ACTCTX_FLAG_HMODULE_VALID;
+    activation.lpResourceName = MAKEINTRESOURCEW(2);
+    activation.hModule = GetModuleHandleW(L"PrismaUI_F4.dll");
+
+    HANDLE context = CreateActCtxW(&activation);
+    ULONG_PTR cookie = 0;
+    const bool active = context != INVALID_HANDLE_VALUE && ActivateActCtx(context, &cookie);
+
+    using TaskDialogFn = HRESULT(WINAPI*)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
+    HMODULE comctl = LoadLibraryW(L"comctl32.dll");
+    TaskDialogFn taskDialog = comctl ? reinterpret_cast<TaskDialogFn>(GetProcAddress(comctl, "TaskDialogIndirect"))
+                                     : nullptr;
+
+    int button = 0;
+    HRESULT result = E_NOTIMPL;
+    if (taskDialog) result = taskDialog(&dialog, &button, nullptr, nullptr);
+
+    if (comctl) FreeLibrary(comctl);
+    if (active) DeactivateActCtx(0, cookie);
+    if (context != INVALID_HANDLE_VALUE) ReleaseActCtx(context);
+
+    if (FAILED(result) || button == 0) {
+        const std::wstring fallback =
+            L"GPU overlay software detected: " + overlayName + L"\n\n"
+            L"This software hooks DirectX and can conflict with Ultralight rendering.\n\n"
+            L"Click OK to continue. Close the overlay if rendering problems occur.\n\n"
+            L"https://www.youtube.com/watch?v=1NPqDMlYGz0";
+        MessageBoxW(nullptr, fallback.c_str(), L"PrismaUI - Overlay Detected", MB_OK | MB_ICONWARNING);
+    }
+
+    const std::string iniPath = GetIniPath();
+    if (!iniPath.empty()) WritePrivateProfileStringA("Compatibility", "bAllowOverlays", "1", iniPath.c_str());
+}
+
+void F4SEMessageHandler(F4SE::MessagingInterface::Message* message)
+{
+    if (message && message->type == F4SE::MessagingInterface::kGameDataReady) {
         Hooks::D3DHooks::Install();
     }
 }
 
-// F4SE plugin version data - required for the NG/AE loader to recognise the DLL.
-// This target links commonlibf4 directly (it does NOT use the commonlibf4.plugin
-// rule), so the version export is declared here rather than auto-generated.
-// One DLL serves OG + NG + AE (COMMONLIB_RUNTIMECOUNT=3).
-F4SE_PLUGIN_VERSION = []() noexcept {
-    F4SE::PluginVersionData v{};
-    v.PluginVersion({ 1, 0, 0, 0 });
-    v.PluginName("PrismaUI_F4");
-    v.AuthorName("PrismaUI");
-    v.UsesAddressLibrary(true);     // 1.11.137+ (AE) address library
-    v.UsesAddressLibraryNG(true);   // 1.10.980/984 (NG) address library
-    v.UsesSigScanning(false);
-    v.IsLayoutDependent(true);
-    v.IsLayoutDependentNG(true);
-    v.HasNoStructUse(false);
-    return v;
-}();
-
-// F4SEPlugin_Query - used by the Old-Gen (1.10.163) loader, which predates the
-// version-data export above. Both are exported so one DLL loads on OG and NG.
-F4SE_PLUGIN_QUERY(const F4SE::QueryInterface* a_f4se, F4SE::PluginInfo* a_info)
-{
-    a_info->infoVersion = F4SE::PluginInfo::kVersion;
-    a_info->name = "PrismaUI_F4";
-    a_info->version = 1;
-
-    if (a_f4se->IsEditor()) {
-        return false;
-    }
-    return a_f4se->RuntimeVersion() >= F4SE::RUNTIME_1_10_162;
 }
 
-// F4SE::Init() creates the log file automatically at:
-//   %USERPROFILE%\Documents\My Games\Fallout4\F4SE\PrismaUI_F4.log
-F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_intfc)
+F4SE_PLUGIN_VERSION = []() noexcept {
+    F4SE::PluginVersionData version{};
+    version.PluginVersion({1, 0, 0, 0});
+    version.PluginName("PrismaUI_F4");
+    version.AuthorName("PrismaUI");
+    version.UsesAddressLibrary(true);
+    version.UsesAddressLibraryNG(true);
+    version.UsesSigScanning(false);
+    version.IsLayoutDependent(true);
+    version.IsLayoutDependentNG(true);
+    version.HasNoStructUse(false);
+    return version;
+}();
+
+F4SE_PLUGIN_QUERY(const F4SE::QueryInterface* f4se, F4SE::PluginInfo* info)
 {
-    F4SE::Init(a_intfc, F4SE::InitInfo{
-        .logName        = "PrismaUI_F4",
-        .trampoline     = true,
-        .trampolineSize = 1 << 10
+    info->infoVersion = F4SE::PluginInfo::kVersion;
+    info->name = "PrismaUI_F4";
+    info->version = 1;
+    if (f4se->IsEditor()) return false;
+    return f4se->RuntimeVersion() >= F4SE::RUNTIME_1_10_162;
+}
+
+F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* f4se)
+{
+    F4SE::Init(f4se, F4SE::InitInfo{
+        .logName = "PrismaUI_F4",
+        .trampoline = true,
+        .trampolineSize = 1 << 10,
     });
+
+    PrismaUI::GameThreadDispatcher::CaptureCurrentThread();
 
     g_overlayDetected = IsConflictingOverlayRunning();
     if (g_overlayDetected) {
         const bool allowOverlays = ReadIniBool("Compatibility", "bAllowOverlays", false);
-        logger::warn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         logger::warn("[PrismaUI] Overlay detected: {}", g_detectedOverlayName);
-        if (allowOverlays) {
-            logger::warn("[PrismaUI] bAllowOverlays=1 in PrismaUI_F4.ini — continuing anyway");
-            logger::warn("[PrismaUI] Rendering artifacts or crashes may occur. Use at your own risk.");
-            logger::warn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        } else {
-            logger::warn("[PrismaUI] Exiting. Set bAllowOverlays=1 in PrismaUI_F4.ini to suppress this.");
-            logger::warn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        if (!allowOverlays) {
+            logger::warn("[PrismaUI] Showing one-time overlay warning; loading continues after acknowledgement.");
             NotifyUserOverlayDetected();
         }
     }
 
     const auto* messaging = F4SE::GetMessagingInterface();
     if (!messaging) {
-        logger::critical("Failed to get F4SE messaging interface!");
+        logger::critical("Failed to get F4SE messaging interface");
         return false;
     }
     messaging->RegisterListener(F4SEMessageHandler);
 
     if (!PrismaUI::Utils::DllLoader::GetSingleton().LoadUltralightLibraries()) {
-        logger::critical("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        logger::critical("[PrismaUI CRITICAL] Failed to load Ultralight libraries!");
-        logger::critical("Required files missing from: Data/PrismaUI_F4/libs/");
-        logger::critical("  AppCore.dll, Ultralight.dll, UltralightCore.dll, WebCore.dll");
-        logger::critical("Also check Data/PrismaUI_F4/resources/: cacert.pem, icudt67l.dat");
-        logger::critical("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        logger::critical("Failed to load Ultralight libraries from Data/PrismaUI_F4/libs");
         return false;
     }
 
@@ -239,32 +192,19 @@ F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_intfc)
     return true;
 }
 
-// Exported entry point that every PrismaUI client plugin resolves via
-// GetProcAddress(GetModuleHandleW(L"PrismaUI_F4.dll"), "RequestPluginAPI").
-extern "C" __declspec(dllexport) void* F4SEAPI RequestPluginAPI(const PRISMA_UI_API::InterfaceVersion a_interfaceVersion)
+extern "C" __declspec(dllexport) void* F4SEAPI RequestPluginAPI(PRISMA_UI_API::InterfaceVersion version)
 {
-    if (g_pluginDisabled) {
-        logger::warn("RequestPluginAPI: PrismaUI is disabled (GPU overlay detected)");
-        return nullptr;
-    }
-
-    auto api = PluginAPI::PrismaUIInterface::GetSingleton();
-
-    switch (a_interfaceVersion) {
-    case PRISMA_UI_API::InterfaceVersion::V1:
-        logger::info("RequestPluginAPI returned V1 interface");
-        return static_cast<PRISMA_UI_API::IVPrismaUI1*>(api);
-    case PRISMA_UI_API::InterfaceVersion::V2:
-        logger::info("RequestPluginAPI returned V2 interface");
-        return static_cast<PRISMA_UI_API::IVPrismaUI2*>(api);
-    case PRISMA_UI_API::InterfaceVersion::V3:
-        logger::info("RequestPluginAPI returned V3 interface");
-        return static_cast<PRISMA_UI_API::IVPrismaUI3*>(api);
-    case PRISMA_UI_API::InterfaceVersion::V4:
-        logger::info("RequestPluginAPI returned V4 interface");
-        return static_cast<PRISMA_UI_API::IVPrismaUI4*>(api);
-    default:
-        logger::info("RequestPluginAPI: unsupported interface version");
-        return nullptr;
+    auto* api = PluginAPI::PrismaUIInterface::GetSingleton();
+    switch (version) {
+        case PRISMA_UI_API::InterfaceVersion::V1:
+            return static_cast<PRISMA_UI_API::IVPrismaUI1*>(api);
+        case PRISMA_UI_API::InterfaceVersion::V2:
+            return static_cast<PRISMA_UI_API::IVPrismaUI2*>(api);
+        case PRISMA_UI_API::InterfaceVersion::V3:
+            return static_cast<PRISMA_UI_API::IVPrismaUI3*>(api);
+        case PRISMA_UI_API::InterfaceVersion::V4:
+            return static_cast<PRISMA_UI_API::IVPrismaUI4*>(api);
+        default:
+            return nullptr;
     }
 }

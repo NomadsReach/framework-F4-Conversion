@@ -7,6 +7,7 @@
 #include <Ultralight/Ultralight.h>
 #pragma warning(pop)
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <shared_mutex>
@@ -15,48 +16,37 @@
 class SingleThreadExecutor;
 
 namespace PrismaUI::Core {
-    typedef uint64_t PrismaViewId;
-    struct PrismaView;
+typedef uint64_t PrismaViewId;
+struct PrismaView;
 }
 
 namespace PrismaUI::InputHandler {
-    using namespace ultralight;
+using namespace ultralight;
 
-    // Wrapper for scroll events that includes mouse position for proper routing
-    struct ScrollEventWithPosition {
-        ScrollEvent event;
-        int mouseX;
-        int mouseY;
-    };
+struct ScrollEventWithPosition {
+    ScrollEvent event;
+    int mouseX;
+    int mouseY;
+};
 
-    using InputEvent = std::variant<MouseEvent, ScrollEventWithPosition, KeyEvent>;
+using InputEvent = std::variant<MouseEvent, ScrollEventWithPosition, KeyEvent>;
+using OverlayClickCallback = std::function<bool(int x, int y)>;
 
-    void Initialize(HWND gameHwnd, SingleThreadExecutor* coreExecutor,
-                    std::map<Core::PrismaViewId, std::shared_ptr<Core::PrismaView>>* viewsMap,
-                    std::shared_mutex* viewsMapMutex);
+void Initialize(HWND gameHwnd, SingleThreadExecutor* coreExecutor,
+                std::map<Core::PrismaViewId, std::shared_ptr<Core::PrismaView>>* viewsMap,
+                std::shared_mutex* viewsMapMutex);
+void EnableInputCapture(const Core::PrismaViewId& viewId);
+void DisableInputCapture(const Core::PrismaViewId& viewId);
+void ClearImeState(const Core::PrismaViewId& viewId);
+bool IsInputCaptureActiveForView(const Core::PrismaViewId& viewId);
+bool IsAnyInputCaptureActive();
+Core::PrismaViewId GetFocusedViewId();
+int GetLastCursorX();
+int GetLastCursorY();
+bool InstallWndProcHook();
+void UninstallWndProcHook();
+void ProcessEvents();
+void Shutdown();
+void RegisterOverlayClickHandler(OverlayClickCallback cb);
 
-    void EnableInputCapture(const Core::PrismaViewId& viewId);
-    void DisableInputCapture(const Core::PrismaViewId& viewId);
-    void ClearImeState(const Core::PrismaViewId& viewId);
-
-    bool IsInputCaptureActiveForView(const Core::PrismaViewId& viewId);
-
-    bool IsAnyInputCaptureActive();
-
-    Core::PrismaViewId GetFocusedViewId();
-
-    int GetLastCursorX();
-    int GetLastCursorY();
-
-    bool InstallWndProcHook();
-    void UninstallWndProcHook();
-
-    void ProcessEvents();
-    void Shutdown();
-
-    // Register a callback that is tested against every WM_LBUTTONDOWN BEFORE
-    // PrismaUI input capture and before Scaleform/game input routing.
-    // cb(clientX, clientY) → return true to consume the click (Scaleform won't see it).
-    using OverlayClickCallback = std::function<bool(int x, int y)>;
-    void RegisterOverlayClickHandler(OverlayClickCallback cb);
 }

@@ -8,10 +8,10 @@
 #pragma warning(pop)
 
 namespace WinKeyHandler {
-	using namespace ultralight::KeyCodes;
+    using namespace ultralight::KeyCodes;
 
-	int WinKeyToUltralightKey(UINT win_key);
-	std::string GetUltralightKeyIdentifier(int ul_key);
-	void GetUltralightModifiers(ultralight::KeyEvent& ev);
-	ultralight::KeyEvent CreateKeyEvent(ultralight::KeyEvent::Type type, WPARAM wParam, LPARAM lParam);
+    int WinKeyToUltralightKey(UINT winKey);
+    std::string GetUltralightKeyIdentifier(int ulKey);
+    void GetUltralightModifiers(ultralight::KeyEvent& event);
+    ultralight::KeyEvent CreateKeyEvent(ultralight::KeyEvent::Type type, WPARAM wParam, LPARAM lParam);
 }

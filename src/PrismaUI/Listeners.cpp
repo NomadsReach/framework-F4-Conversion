@@ -1,4 +1,7 @@
-﻿#include "Listeners.h"
+#include "Listeners.h"
+
+#include <algorithm>
+#include <cctype>
 
 #include "Communication.h"
 #include "Core.h"
@@ -8,173 +11,186 @@
 #include "Translations.h"
 
 namespace PrismaUI::Listeners {
-    using namespace Core;
-    using namespace Communication;
+using namespace Communication;
+using namespace Core;
 
-    // MyLoadListener
-    MyLoadListener::MyLoadListener(Core::PrismaViewId id) : viewId_(std::move(id)) {}
+namespace {
 
-    MyLoadListener::~MyLoadListener() = default;
+std::shared_ptr<PrismaView> GetLiveView(Core::PrismaViewId viewId)
+{
+    std::shared_lock lock(viewsMutex);
+    auto it = views.find(viewId);
+    if (it == views.end() || !it->second || it->second->isDestroying.load(std::memory_order_acquire)) return nullptr;
+    return it->second;
+}
 
-    void MyLoadListener::OnBeginLoading(View* /*caller*/, uint64_t /*frame_id*/, bool /*is_main_frame*/,
-                                        const String& url) {
-        logger::info("View [{}]: LoadListener: Begin loading URL: {}", viewId_, url.utf8().data());
+bool IsTrustedMainFrameUrl(const String& url)
+{
+    std::string value = url.utf8().data();
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+
+    constexpr std::string_view prefix = "file:///views/";
+    if (!value.starts_with(prefix)) return false;
+    if (value.find("..", prefix.size()) != std::string::npos) return false;
+    if (value.find("%2e", prefix.size()) != std::string::npos) return false;
+    if (value.find("%2f", prefix.size()) != std::string::npos) return false;
+    if (value.find("%5c", prefix.size()) != std::string::npos) return false;
+    return true;
+}
+
+void RestoreLocalView(View* caller, Core::PrismaViewId viewId, const String& rejectedUrl)
+{
+    auto viewData = GetLiveView(viewId);
+    if (!caller || !viewData || viewData->originalUrl.empty()) return;
+
+    const std::string rejected = rejectedUrl.utf8().data();
+    if (rejected == viewData->originalUrl) return;
+
+    logger::warn("[PrismaUI Security] View [{}] blocked main-frame navigation to '{}'", viewId, rejected);
+    caller->LoadURL(String(viewData->originalUrl.c_str()));
+}
+
+}
+
+MyLoadListener::MyLoadListener(Core::PrismaViewId id) : viewId_(id) {}
+MyLoadListener::~MyLoadListener() = default;
+
+void MyLoadListener::OnBeginLoading(View* caller, uint64_t, bool isMainFrame, const String& url)
+{
+    if (!isMainFrame) return;
+    if (!IsTrustedMainFrameUrl(url)) {
+        RestoreLocalView(caller, viewId_, url);
+        return;
+    }
+    logger::info("View [{}]: loading {}", viewId_, url.utf8().data());
+}
+
+void MyLoadListener::OnFinishLoading(View*, uint64_t, bool isMainFrame, const String& url)
+{
+    if (!isMainFrame || !IsTrustedMainFrameUrl(url)) return;
+
+    auto viewData = GetLiveView(viewId_);
+    if (!viewData) return;
+
+    viewData->lastLoadedUrl = url.utf8().data();
+    viewData->recoveryAttempts.store(0, std::memory_order_release);
+    viewData->isLoadingFinished.store(true, std::memory_order_release);
+    Communication::BindJSCallbacks(viewId_);
+    logger::info("View [{}]: load complete", viewId_);
+}
+
+void MyLoadListener::OnFailLoading(View*, uint64_t, bool isMainFrame, const String& url,
+                                   const String& description, const String&, int)
+{
+    if (!isMainFrame) return;
+
+    auto viewData = GetLiveView(viewId_);
+    if (viewData) viewData->isLoadingFinished.store(false, std::memory_order_release);
+
+    logger::error("View [{}]: failed loading {}: {}", viewId_, url.utf8().data(), description.utf8().data());
+}
+
+void MyLoadListener::OnWindowObjectReady(View* caller, uint64_t, bool isMainFrame, const String& url)
+{
+    if (!isMainFrame || !caller || !IsTrustedMainFrameUrl(url)) return;
+
+    auto viewData = GetLiveView(viewId_);
+    if (!viewData) return;
+    const std::string pluginName = viewData->translationPluginName;
+
+    PapyrusBridge::InjectBridge(caller, viewId_);
+
+    const std::string sandbox = NetworkSandbox::BuildScript();
+    ultralight::String exception;
+    caller->EvaluateScript(ultralight::String(sandbox.c_str()), &exception);
+    if (!exception.empty()) {
+        logger::warn("View [{}]: network sandbox injection failed: {}", viewId_, exception.utf8().data());
     }
 
-    void MyLoadListener::OnFinishLoading(View* /*caller*/, uint64_t /*frame_id*/, bool /*is_main_frame*/,
-                                         const String& url) {
-        logger::info("View [{}]: LoadListener: Finished loading URL: {}", viewId_, url.utf8().data());
-        ultralightThread.submit([id = viewId_, urlStr = std::string(url.utf8().data())] {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(id);
-            if (it != views.end()) {
-                it->second->isLoadingFinished = true;
-                it->second->lastLoadedUrl = urlStr;
-                it->second->recoveryAttempts = 0;
-                Communication::BindJSCallbacks(id);
-            }
-        });
-    }
+    if (pluginName.empty()) return;
 
-    void MyLoadListener::OnFailLoading(View* /*caller*/, uint64_t /*frame_id*/, bool /*is_main_frame*/,
-                                       const String& url, const String& description, const String& /*error_domain*/,
-                                       int /*error_code*/) {
-        logger::error("View [{}]: LoadListener: Failed loading URL: {}. Error: {}", viewId_, url.utf8().data(),
-                      description.utf8().data());
-        ultralightThread.submit([id = viewId_] {
-            std::shared_lock lock(viewsMutex);
-            auto it = views.find(id);
-            if (it != views.end()) {
-                it->second->isLoadingFinished = false;
-            }
-        });
-    }
+    const auto language = Translations::DetectGameLanguage();
+    const auto translations = Translations::ParseTranslationFile(pluginName, language);
+    const auto script = Translations::BuildL10NScript(translations);
+    if (!script.empty()) caller->EvaluateScript(ultralight::String(script.c_str()));
+}
 
-    void MyLoadListener::OnWindowObjectReady(View* caller, uint64_t /*frame_id*/, bool is_main_frame,
-                                             const String& /*url*/) {
-        if (!is_main_frame) return;
-        logger::info("View [{}]: LoadListener: Window object ready.", viewId_);
+void MyLoadListener::OnDOMReady(View*, uint64_t, bool isMainFrame, const String& url)
+{
+    if (!isMainFrame || !IsTrustedMainFrameUrl(url)) return;
 
-        // Inject window.prisma before page scripts load
-        PapyrusBridge::InjectBridge(caller, viewId_);
-
-        // Network sandbox: JS kill + CSP meta. Runs before page scripts.
-        {
-            ultralight::String exc;
-            caller->EvaluateScript(ultralight::String(NetworkSandbox::kNetworkBlockScript), &exc);
-            if (!exc.empty())
-                logger::warn("View [{}]: Network sandbox injection failed: {}", viewId_, exc.utf8().data());
-            else
-                logger::debug("View [{}]: Network sandbox injected.", viewId_);
-        }
-
+    std::function<void(Core::PrismaViewId)> callback;
+    {
         std::shared_lock lock(viewsMutex);
         auto it = views.find(viewId_);
-        if (it == views.end() || !it->second || it->second->translationPluginName.empty()) return;
-
-        std::string pluginName = it->second->translationPluginName;
-        lock.unlock();
-
-        auto lang = Translations::DetectGameLanguage();
-        auto map  = Translations::ParseTranslationFile(pluginName, lang);
-        auto script = Translations::BuildL10NScript(map);
-        if (script.empty()) return;
-
-        ultralight::String ulScript(script.c_str());
-        caller->EvaluateScript(ulScript);
-        logger::info("View [{}]: Injected L10N for '{}' ({} keys, lang={})", viewId_, pluginName, map.size(), lang);
+        if (it == views.end() || !it->second || it->second->isDestroying.load(std::memory_order_acquire)) return;
+        callback = it->second->domReadyCallback;
     }
 
-    void MyLoadListener::OnDOMReady(View* /*caller*/, uint64_t /*frame_id*/, bool is_main_frame,
-                                    const String& /*url*/) {
-        if (is_main_frame) {
-            logger::info("View [{}]: LoadListener: DOM ready.", viewId_);
+    if (callback) callback(viewId_);
+}
 
-            ultralightThread.submit([id = viewId_] {
-                std::shared_lock lock(viewsMutex);
-                auto it = views.find(id);
-                if (it != views.end() && it->second->domReadyCallback) {
-                    it->second->domReadyCallback(id);
-                }
-            });
-        }
+MyViewListener::MyViewListener(Core::PrismaViewId id) : viewId_(id) {}
+MyViewListener::~MyViewListener() = default;
+
+RefPtr<View> MyViewListener::OnCreateChildView(View*, const String&, const String& targetUrl, bool, const IntRect&)
+{
+    logger::warn("[PrismaUI Security] blocked child view navigation to '{}'", targetUrl.utf8().data());
+    return nullptr;
+}
+
+void MyViewListener::OnAddConsoleMessage(View*, const ConsoleMessage& message)
+{
+    if (message.source() == kMessageSource_Network) {
+        logger::warn("[PrismaUI Security] View [{}]: [Network] {}", viewId_, message.message().utf8().data());
     }
 
-    // MyViewListener
-    MyViewListener::MyViewListener(Core::PrismaViewId id) : viewId_(std::move(id)) {}
-
-    MyViewListener::~MyViewListener() = default;
-
-    // Block child view creation (window.open, target=_blank)
-    RefPtr<View> MyViewListener::OnCreateChildView(View* /*caller*/, const String& /*opener_url*/,
-                                                    const String& target_url, bool /*is_popup*/,
-                                                    const IntRect& /*popup_rect*/) {
-        logger::warn("[PrismaUI Security] Blocked child view navigation to '{}'",
-                     target_url.utf8().data());
-        return nullptr;
-    }
-
-    void MyViewListener::OnAddConsoleMessage(ultralight::View* /*caller*/,
-                                              const ultralight::ConsoleMessage& message) {
-        // kMessageSource_Network errors indicate blocked resource loads or CSP violations
-        if (message.source() == kMessageSource_Network) {
-            logger::warn("[PrismaUI Security] View [{}]: [Network] {}", viewId_, message.message().utf8().data());
-        }
+    std::function<void(Core::PrismaViewId, PRISMA_UI_API::ConsoleMessageLevel, const std::string&)> callback;
+    {
         std::shared_lock lock(viewsMutex);
         auto it = views.find(viewId_);
-        if (it != views.end() && it->second && it->second->consoleMessageCallback) {
-            PRISMA_UI_API::ConsoleMessageLevel prismaLevel = PRISMA_UI_API::ConsoleMessageLevel::Log;
-            switch (message.level()) {
-                case kMessageLevel_Warning: prismaLevel = PRISMA_UI_API::ConsoleMessageLevel::Warning; break;
-                case kMessageLevel_Error:   prismaLevel = PRISMA_UI_API::ConsoleMessageLevel::Error; break;
-                case kMessageLevel_Debug:   prismaLevel = PRISMA_UI_API::ConsoleMessageLevel::Debug; break;
-                case kMessageLevel_Info:    prismaLevel = PRISMA_UI_API::ConsoleMessageLevel::Info; break;
-                default: break;
-            }
-            auto msg = std::string(message.message().utf8().data());
-            auto cb  = it->second->consoleMessageCallback;
-            auto id  = viewId_;
-            lock.unlock();
-            cb(id, prismaLevel, msg);
-        }
+        if (it == views.end() || !it->second || it->second->isDestroying.load(std::memory_order_acquire)) return;
+        callback = it->second->consoleMessageCallback;
+    }
+    if (!callback) return;
+
+    PRISMA_UI_API::ConsoleMessageLevel level = PRISMA_UI_API::ConsoleMessageLevel::Log;
+    switch (message.level()) {
+        case kMessageLevel_Warning: level = PRISMA_UI_API::ConsoleMessageLevel::Warning; break;
+        case kMessageLevel_Error: level = PRISMA_UI_API::ConsoleMessageLevel::Error; break;
+        case kMessageLevel_Debug: level = PRISMA_UI_API::ConsoleMessageLevel::Debug; break;
+        case kMessageLevel_Info: level = PRISMA_UI_API::ConsoleMessageLevel::Info; break;
+        default: break;
     }
 
-    RefPtr<View> MyViewListener::OnCreateInspectorView(View* /*caller*/, bool is_local, const String& inspectedURL) {
-        logger::info(
-            "View [{}]: ViewListener: OnCreateInspectorView called (is_local={}, "
-            "URL={})",
-            viewId_, is_local, inspectedURL.utf8().data());
+    callback(viewId_, level, message.message().utf8().data());
+}
 
-        RefPtr<View> inspectorView = nullptr;
+RefPtr<View> MyViewListener::OnCreateInspectorView(View*, bool, const String&)
+{
+    std::unique_lock lock(viewsMutex);
+    auto it = views.find(viewId_);
+    if (it == views.end() || !it->second || it->second->isDestroying.load(std::memory_order_acquire)) return nullptr;
 
-        std::unique_lock lock(viewsMutex);
-        auto it = views.find(viewId_);
-        if (it != views.end() && it->second) {
-            auto viewData = it->second;
+    auto& viewData = it->second;
+    if (viewData->inspectorView) return viewData->inspectorView;
+    if (!viewData->ultralightView || !renderer) return nullptr;
 
-            if (!viewData->inspectorView && viewData->ultralightView && renderer) {
-                uint32_t width = viewData->inspectorDisplayWidth > 0 ? viewData->inspectorDisplayWidth : 800;
-                uint32_t height = viewData->inspectorDisplayHeight > 0 ? viewData->inspectorDisplayHeight : 600;
+    uint32_t width = viewData->inspectorDisplayWidth.load(std::memory_order_acquire);
+    uint32_t height = viewData->inspectorDisplayHeight.load(std::memory_order_acquire);
+    if (width == 0) width = 800;
+    if (height == 0) height = 600;
 
-                ViewConfig config;
-                config.is_accelerated = false;
-                config.is_transparent = true;
+    ViewConfig config;
+    config.is_accelerated = false;
+    config.is_transparent = true;
+    viewData->inspectorView = renderer->CreateView(width, height, config, nullptr);
+    return viewData->inspectorView;
+}
 
-                viewData->inspectorView = renderer->CreateView(width, height, config, nullptr);
-                inspectorView = viewData->inspectorView;
+MyUltralightLogger::~MyUltralightLogger() = default;
+void MyUltralightLogger::LogMessage(LogLevel, const String&) {}
 
-                logger::info("View [{}]: Inspector view created with size {}x{}", viewId_, width, height);
-            } else if (viewData->inspectorView) {
-                inspectorView = viewData->inspectorView;
-                logger::info("View [{}]: Returning existing inspector view", viewId_);
-            }
-        }
-
-        return inspectorView;
-    }
-
-    // MyUltralightLogger
-    MyUltralightLogger::~MyUltralightLogger() = default;
-
-    void MyUltralightLogger::LogMessage(LogLevel /*log_level*/, const String& /*message*/) {}
-}  // namespace PrismaUI::Listeners
+}

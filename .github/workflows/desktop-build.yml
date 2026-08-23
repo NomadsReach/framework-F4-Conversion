@@ -1,0 +1,20 @@
+name: Desktop build
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - fix/scaleform-focus-lifecycle
+
+jobs:
+  build-ng:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: xmake-io/github-action-setup-xmake@v1.2.5
+        with:
+          xmake-version: latest
+      - run: cmd /c build.bat ng

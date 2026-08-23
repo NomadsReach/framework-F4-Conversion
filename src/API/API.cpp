@@ -1,294 +1,255 @@
 #include "API.h"
-#include "Utils/Encoding.h"
-#include "PrismaUI/ViewManager.h"
-#include "PrismaUI/Communication.h"
-#include "PrismaUI/Translations.h"
 
-PrismaView PluginAPI::PrismaUIInterface::CreateView(const char* htmlPath, PRISMA_UI_API::OnDomReadyCallback onDomReadyCallback) noexcept
+#include "PrismaUI/Communication.h"
+#include "PrismaUI/GameThreadDispatcher.h"
+#include "PrismaUI/Translations.h"
+#include "PrismaUI/ViewManager.h"
+#include "Utils/Encoding.h"
+
+namespace {
+
+bool DispatchLegacyCallback(PrismaUI::Core::PrismaViewId viewId, std::function<void()> callback)
 {
-    if (!htmlPath) {
+    if (!callback) return false;
+    auto fallback = callback;
+    if (PrismaUI::GameThreadDispatcher::Dispatch(std::move(callback), viewId)) return true;
+
+    if (auto* tasks = F4SE::GetTaskInterface()) {
+        tasks->AddTask(std::move(fallback));
+        return true;
+    }
+    return false;
+}
+
+std::string NormalizeUtf8(const char* value)
+{
+    if (!value) return {};
+    if (isValidUTF8(value)) return value;
+    return convertFromANSIToUTF8(value);
+}
+
+}
+
+PrismaView PluginAPI::PrismaUIInterface::CreateView(
+    const char* htmlPath, PRISMA_UI_API::OnDomReadyCallback onDomReadyCallback) noexcept
+{
+    if (!htmlPath) return 0;
+
+    try {
+        std::function<void(PrismaUI::Core::PrismaViewId)> wrapper;
+        if (onDomReadyCallback) {
+            wrapper = [onDomReadyCallback](PrismaUI::Core::PrismaViewId viewId) {
+                if (!DispatchLegacyCallback(viewId, [onDomReadyCallback, viewId] { onDomReadyCallback(viewId); })) {
+                    logger::error("OnDomReady dispatch failed for View [{}]", viewId);
+                }
+            };
+        }
+        return PrismaUI::ViewManager::Create(htmlPath, std::move(wrapper));
+    } catch (const std::exception& e) {
+        logger::error("CreateView failed: {}", e.what());
+        return 0;
+    } catch (...) {
+        logger::error("CreateView failed");
         return 0;
     }
-
-    std::function<void(PrismaUI::Core::PrismaViewId)> domReadyWrapper = nullptr;
-    if (onDomReadyCallback) {
-        domReadyWrapper = [onDomReadyCallback](PrismaUI::Core::PrismaViewId viewId) {
-            logger::info("CreateView: DOM ready for view [{}] — dispatching OnDomReady to game thread", viewId);
-            F4SE::GetTaskInterface()->AddTask([callback = onDomReadyCallback, id = viewId]() {
-                logger::info("CreateView: OnDomReady fired for view [{}] on game thread", id);
-                callback(id);
-            });
-        };
-    }
-
-    auto newViewId = PrismaUI::ViewManager::Create(htmlPath, domReadyWrapper);
-    logger::info("CreateView: path='{}' -> view [{}]", htmlPath, newViewId);
-    return newViewId;
 }
 
-void PluginAPI::PrismaUIInterface::Invoke(PrismaView view, const char* script, PRISMA_UI_API::JSCallback callback) noexcept
+void PluginAPI::PrismaUIInterface::Invoke(PrismaView view, const char* script,
+                                          PRISMA_UI_API::JSCallback callback) noexcept
 {
-    if (!view || !script) {
-        return;
-    }
+    if (!view || !script) return;
 
-    std::string processedScript;
+    try {
+        const std::string normalized = NormalizeUtf8(script);
+        if (normalized.empty() && script[0] != '\0') return;
 
-    if (isValidUTF8(script)) {
-        processedScript = script;
-    }
-    else {
-        processedScript = convertFromANSIToUTF8(script);
-        if (processedScript.empty()) {
-            return;  // Conversion failed, cannot safely invoke
+        std::function<void(std::string)> wrapper;
+        if (callback) {
+            wrapper = [callback, view](std::string result) {
+                if (!DispatchLegacyCallback(view, [callback, result = std::move(result)] { callback(result.c_str()); })) {
+                    logger::error("Invoke callback dispatch failed for View [{}]", view);
+                }
+            };
         }
+
+        PrismaUI::Communication::Invoke(view, ultralight::String(normalized.c_str()), std::move(wrapper));
+    } catch (const std::exception& e) {
+        logger::error("Invoke failed for View [{}]: {}", view, e.what());
+    } catch (...) {
+        logger::error("Invoke failed for View [{}]", view);
     }
+}
 
-    ultralight::String _script(processedScript.c_str());
+void PluginAPI::PrismaUIInterface::InteropCall(PrismaView view, const char* functionName,
+                                                const char* argument) noexcept
+{
+    if (!view || !functionName || !argument) return;
 
-    std::function<void(std::string)> callbackWrapper = nullptr;
+    try {
+        const std::string normalized = NormalizeUtf8(argument);
+        if (normalized.empty() && argument[0] != '\0') return;
+        PrismaUI::Communication::InteropCall(view, functionName, normalized);
+    } catch (const std::exception& e) {
+        logger::error("InteropCall failed for View [{}]: {}", view, e.what());
+    } catch (...) {
+        logger::error("InteropCall failed for View [{}]", view);
+    }
+}
 
-    if (callback) {
-        callbackWrapper = [callback](const std::string& result) {
-            F4SE::GetTaskInterface()->AddTask([targetCallback = callback, data = result]() {
-                targetCallback(data.c_str());
+void PluginAPI::PrismaUIInterface::RegisterJSListener(PrismaView view, const char* functionName,
+                                                       PRISMA_UI_API::JSListenerCallback callback) noexcept
+{
+    if (!view || !functionName || !functionName[0] || !callback) return;
+
+    try {
+        PrismaUI::Communication::RegisterJSListener(view, functionName,
+            [callback, view](std::string argument) {
+                if (!DispatchLegacyCallback(view,
+                        [callback, argument = std::move(argument)] { callback(argument.c_str()); })) {
+                    logger::error("RegisterJSListener callback dispatch failed for View [{}]", view);
+                }
             });
-        };
+    } catch (const std::exception& e) {
+        logger::error("RegisterJSListener failed for View [{}]: {}", view, e.what());
+    } catch (...) {
+        logger::error("RegisterJSListener failed for View [{}]", view);
     }
-
-    return PrismaUI::Communication::Invoke(view, _script, callbackWrapper);
-}
-
-void PluginAPI::PrismaUIInterface::InteropCall(PrismaView view, const char* functionName, const char* argument) noexcept
-{
-    if (!view || !functionName || !argument) {
-        return;
-    }
-
-    std::string processedArgument;
-
-    if (isValidUTF8(argument)) {
-        processedArgument = argument;
-    }
-    else {
-        processedArgument = convertFromANSIToUTF8(argument);
-        if (processedArgument.empty()) {
-            return;  // Conversion failed, cannot safely call
-        }
-    }
-
-    return PrismaUI::Communication::InteropCall(view, functionName, processedArgument);
-}
-
-void PluginAPI::PrismaUIInterface::RegisterJSListener(PrismaView view, const char* fnName, PRISMA_UI_API::JSListenerCallback callback) noexcept
-{
-    if (!view || !fnName || !callback) {
-        logger::warn("RegisterJSListener: invalid args — view={} fn={}", view, fnName ? fnName : "null");
-        return;
-    }
-
-    logger::info("RegisterJSListener: View [{}] registering '{}'", view, fnName);
-
-    std::string name = fnName;
-    std::function<void(std::string)> callbackWrapper = [callback, view, name](const std::string& arg) {
-        F4SE::GetTaskInterface()->AddTask([targetCallback = callback, data = arg, view, name]() {
-            logger::info("RegisterJSListener fired: View [{}] '{}' — data: '{}'", view, name, data);
-            targetCallback(data.c_str());
-        });
-    };
-
-    return PrismaUI::Communication::RegisterJSListener(view, fnName, callbackWrapper);
 }
 
 bool PluginAPI::PrismaUIInterface::HasFocus(PrismaView view) noexcept
 {
-    if (!view) {
-        return false;
-    }
-    return PrismaUI::ViewManager::HasFocus(view);
+    return view && PrismaUI::ViewManager::HasFocus(view);
 }
 
 bool PluginAPI::PrismaUIInterface::Focus(PrismaView view, bool pauseGame, bool disableFocusMenu) noexcept
 {
-    if (!view) {
-        return false;
-    }
-    return PrismaUI::ViewManager::Focus(view, pauseGame, disableFocusMenu);
+    return view && PrismaUI::ViewManager::Focus(view, pauseGame, disableFocusMenu);
 }
 
 void PluginAPI::PrismaUIInterface::Unfocus(PrismaView view) noexcept
 {
-    if (!view) {
-        return;
-    }
-    return PrismaUI::ViewManager::Unfocus(view);
+    if (view) PrismaUI::ViewManager::Unfocus(view);
 }
 
 void PluginAPI::PrismaUIInterface::Show(PrismaView view) noexcept
 {
-	if (!view) {
-		return;
-	}
-	return PrismaUI::ViewManager::Show(view);
+    if (view) PrismaUI::ViewManager::Show(view);
 }
 
 void PluginAPI::PrismaUIInterface::Hide(PrismaView view) noexcept
 {
-	if (!view) {
-		return;
-	}
-	return PrismaUI::ViewManager::Hide(view);
+    if (view) PrismaUI::ViewManager::Hide(view);
 }
 
 bool PluginAPI::PrismaUIInterface::IsHidden(PrismaView view) noexcept
 {
-	if (!view) {
-		return true;
-	}
-	return PrismaUI::ViewManager::IsHidden(view);
+    return !view || PrismaUI::ViewManager::IsHidden(view);
 }
 
 int PluginAPI::PrismaUIInterface::GetScrollingPixelSize(PrismaView view) noexcept
 {
-    if (!view) {
-        return 0;
-    }
-    return PrismaUI::ViewManager::GetScrollingPixelSize(view);
+    return view ? PrismaUI::ViewManager::GetScrollingPixelSize(view) : 0;
 }
 
 void PluginAPI::PrismaUIInterface::SetScrollingPixelSize(PrismaView view, int pixelSize) noexcept
 {
-    if (!view) {
-        return;
-    }
-    return PrismaUI::ViewManager::SetScrollingPixelSize(view, pixelSize);
+    if (view) PrismaUI::ViewManager::SetScrollingPixelSize(view, pixelSize);
 }
 
 bool PluginAPI::PrismaUIInterface::IsValid(PrismaView view) noexcept
 {
-    if (!view) {
-        return false;
-    }
-    return PrismaUI::ViewManager::IsValid(view);
+    return view && PrismaUI::ViewManager::IsValid(view);
 }
 
 void PluginAPI::PrismaUIInterface::Destroy(PrismaView view) noexcept
 {
-    if (!view) {
-        return;
-    }
-    return PrismaUI::ViewManager::Destroy(view);
+    if (view) PrismaUI::ViewManager::Destroy(view);
 }
 
 void PluginAPI::PrismaUIInterface::SetOrder(PrismaView view, int order) noexcept
 {
-	if (!view) {
-		return;
-	}
-	return PrismaUI::ViewManager::SetOrder(view, order);
+    if (view) PrismaUI::ViewManager::SetOrder(view, order);
 }
 
 int PluginAPI::PrismaUIInterface::GetOrder(PrismaView view) noexcept
 {
-	if (!view) {
-		return -1;
-	}
-	return PrismaUI::ViewManager::GetOrder(view);
+    return view ? PrismaUI::ViewManager::GetOrder(view) : -1;
 }
 
 void PluginAPI::PrismaUIInterface::CreateInspectorView(PrismaView view) noexcept
 {
-    if (!view) {
-        return;
-    }
-    return PrismaUI::ViewManager::CreateInspectorView(view);
+    if (view) PrismaUI::ViewManager::CreateInspectorView(view);
 }
 
 void PluginAPI::PrismaUIInterface::SetInspectorVisibility(PrismaView view, bool visible) noexcept
 {
-    if (!view) {
-        return;
-    }
-    return PrismaUI::ViewManager::SetInspectorVisibility(view, visible);
+    if (view) PrismaUI::ViewManager::SetInspectorVisibility(view, visible);
 }
 
 bool PluginAPI::PrismaUIInterface::IsInspectorVisible(PrismaView view) noexcept
 {
-    if (!view) {
-        return false;
-    }
-    return PrismaUI::ViewManager::IsInspectorVisible(view);
+    return view && PrismaUI::ViewManager::IsInspectorVisible(view);
 }
 
-void PluginAPI::PrismaUIInterface::SetInspectorBounds(PrismaView view, float topLeftX, float topLeftY, unsigned int width, unsigned int height) noexcept
+void PluginAPI::PrismaUIInterface::SetInspectorBounds(PrismaView view, float topLeftX, float topLeftY,
+                                                       unsigned int width, unsigned int height) noexcept
 {
-    if (!view) {
-        return;
-    }
-    return PrismaUI::ViewManager::SetInspectorBounds(view, topLeftX, topLeftY, width, height);
+    if (view) PrismaUI::ViewManager::SetInspectorBounds(view, topLeftX, topLeftY, width, height);
 }
 
 bool PluginAPI::PrismaUIInterface::HasAnyActiveFocus() noexcept
 {
-	return PrismaUI::ViewManager::HasAnyActiveFocus();
+    return PrismaUI::ViewManager::HasAnyActiveFocus();
 }
 
-void PluginAPI::PrismaUIInterface::RegisterConsoleCallback(PrismaView view, PRISMA_UI_API::ConsoleMessageCallback callback) noexcept
+void PluginAPI::PrismaUIInterface::RegisterConsoleCallback(
+    PrismaView view, PRISMA_UI_API::ConsoleMessageCallback callback) noexcept
 {
-	if (!view) {
-		return;
-	}
+    if (!view) return;
 
-	if (callback) {
-		logger::info("RegisterConsoleCallback: View [{}] registered JS console capture", view);
-		auto wrappedCallback = [callback](PrismaUI::Core::PrismaViewId id, PRISMA_UI_API::ConsoleMessageLevel level, const std::string& msg) {
-			F4SE::GetTaskInterface()->AddTask([callback, id, level, msg]() {
-				callback(id, level, msg.c_str());
-			});
-		};
-		PrismaUI::ViewManager::RegisterConsoleCallback(view, wrappedCallback);
-	} else {
-		logger::info("RegisterConsoleCallback: View [{}] unregistered JS console capture", view);
-		PrismaUI::ViewManager::RegisterConsoleCallback(view, nullptr);
-	}
+    if (!callback) {
+        PrismaUI::ViewManager::RegisterConsoleCallback(view, nullptr);
+        return;
+    }
+
+    PrismaUI::ViewManager::RegisterConsoleCallback(view,
+        [callback](PrismaUI::Core::PrismaViewId id, PRISMA_UI_API::ConsoleMessageLevel level,
+                   const std::string& message) {
+            if (!DispatchLegacyCallback(id, [callback, id, level, message] { callback(id, level, message.c_str()); })) {
+                logger::error("Console callback dispatch failed for View [{}]", id);
+            }
+        });
 }
 
 void PluginAPI::PrismaUIInterface::RegisterTranslations(PrismaView view, const char* pluginName) noexcept
 {
-	if (!view || !pluginName || pluginName[0] == '\0') {
-		logger::warn("[V3] RegisterTranslations: invalid args — view={}", view);
-		return;
-	}
-	logger::info("[V3] RegisterTranslations: View [{}] -> plugin '{}'", view, pluginName);
-	PrismaUI::ViewManager::RegisterTranslations(view, pluginName);
+    if (view && pluginName && pluginName[0]) PrismaUI::ViewManager::RegisterTranslations(view, pluginName);
 }
 
 void PluginAPI::PrismaUIInterface::BindUIEvent(PrismaView view, const char* functionName,
                                                 PRISMA_UI_API::JSListenerCallback callback) noexcept
 {
-	if (!view || !functionName || !callback) {
-		logger::warn("[V4] BindUIEvent: invalid args — view={} fn={}", view, functionName ? functionName : "null");
-		return;
-	}
+    if (!view || !functionName || !functionName[0] || !callback) return;
+    if (!PrismaUI::GameThreadDispatcher::IsReady()) {
+        logger::error("BindUIEvent refused for View [{}]: verified game-thread dispatcher is not ready", view);
+        return;
+    }
 
-	logger::info("[V4] BindUIEvent: View [{}] registering game-thread listener '{}'", view, functionName);
-
-	std::string fnName = functionName;
-	auto wrapped = [callback, view, fnName](const std::string& arg) {
-		F4SE::GetTaskInterface()->AddTask([callback, view, fnName, arg]() {
-			logger::info("[V4] BindUIEvent fired: View [{}] '{}' — data: '{}'", view, fnName, arg);
-			callback(arg.c_str());
-		});
-	};
-
-	PrismaUI::Communication::RegisterJSListener(view, functionName, wrapped);
+    PrismaUI::Communication::RegisterJSListener(view, functionName,
+        [callback, view](std::string argument) {
+            if (!PrismaUI::GameThreadDispatcher::Dispatch(
+                    [callback, argument = std::move(argument)] { callback(argument.c_str()); }, view)) {
+                logger::error("BindUIEvent callback dispatch failed for View [{}]", view);
+            }
+        });
 }
 
 void PluginAPI::PrismaUIInterface::EnumerateViews(PRISMA_UI_API::ViewEnumCallback callback,
                                                    void* userdata) noexcept
 {
-	if (!callback) return;
-	PrismaUI::ViewManager::EnumerateViews([callback, userdata](PrismaUI::Core::PrismaViewId id, const std::string& path) {
-		callback(static_cast<PrismaView>(id), path.c_str(), userdata);
-	});
+    if (!callback) return;
+    PrismaUI::ViewManager::EnumerateViews(
+        [callback, userdata](PrismaUI::Core::PrismaViewId id, const std::string& path) {
+            callback(static_cast<PrismaView>(id), path.c_str(), userdata);
+        });
 }
